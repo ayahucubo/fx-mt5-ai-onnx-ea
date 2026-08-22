@@ -343,7 +343,28 @@ int OnCalculate(const int rates_total,
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
             if(low[b] < idmPrice) { sweepBar = b; break; }
-         if(sweepBar == -1) continue; // tidak ada sweep lokal -> no inducement, no setup
+         bool idmSwept = (sweepBar != -1);
+
+         // Track IDM ini sebagai referensi TERKINI sekalipun belum ke-sweep (live) --
+         // trader perlu bisa mantengin level ini di chart sebelum tau apakah bakal
+         // di-sweep atau malah keburu ke-supersede oleh pullback yang lebih baru.
+         bufIDM[idmIdx] = idmPrice;
+
+         int idmMitBar = -1;
+         if(idmSwept)
+         {
+            for(int b = sweepBar; b <= lastBar; b++)
+               if(high[b] >= idmPrice) { idmMitBar = b; break; }
+         }
+         bool idmMitigated = idmSwept && (idmMitBar != -1);
+         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
+
+         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
+         if(!InpOnlyLatestBOS)
+            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
+
+         if(!idmSwept) continue; // belum ke-sweep -> H belum valid, belum ada setup
 
          bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
          if(isHH) bufHH[pivots[p].idx] = pivots[p].price;
@@ -352,19 +373,6 @@ int OnCalculate(const int rates_total,
             DrawLabel(time[pivots[p].idx], pivots[p].price, isHH ? "HH" : "LH", isHH ? InpColorHH : InpColorLH, true);
          haveLastValidHigh = true;
          lastValidHighPrice = pivots[p].price;
-
-         bufIDM[idmIdx] = idmPrice;
-
-         int idmMitBar = -1;
-         for(int b = sweepBar; b <= lastBar; b++)
-            if(high[b] >= idmPrice) { idmMitBar = b; break; }
-         bool idmMitigated = (idmMitBar != -1);
-         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
-
-         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
-         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
-         if(!InpOnlyLatestBOS)
-            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
 
          double runLow = idmPrice; int runLowIdx = idmIdx;
          int bosBar = -1;
@@ -448,7 +456,25 @@ int OnCalculate(const int rates_total,
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
             if(high[b] > idmPrice) { sweepBar = b; break; }
-         if(sweepBar == -1) continue;
+         bool idmSwept = (sweepBar != -1);
+
+         bufIDM[idmIdx] = idmPrice;
+
+         int idmMitBar = -1;
+         if(idmSwept)
+         {
+            for(int b = sweepBar; b <= lastBar; b++)
+               if(low[b] <= idmPrice) { idmMitBar = b; break; }
+         }
+         bool idmMitigated = idmSwept && (idmMitBar != -1);
+         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
+
+         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
+         if(!InpOnlyLatestBOS)
+            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
+
+         if(!idmSwept) continue;
 
          bool isLL = !haveLastValidLow || pivots[p].price < lastValidLowPrice;
          if(isLL) bufLL[pivots[p].idx] = pivots[p].price;
@@ -457,19 +483,6 @@ int OnCalculate(const int rates_total,
             DrawLabel(time[pivots[p].idx], pivots[p].price, isLL ? "LL" : "HL", isLL ? InpColorLL : InpColorHL, false);
          haveLastValidLow = true;
          lastValidLowPrice = pivots[p].price;
-
-         bufIDM[idmIdx] = idmPrice;
-
-         int idmMitBar = -1;
-         for(int b = sweepBar; b <= lastBar; b++)
-            if(low[b] <= idmPrice) { idmMitBar = b; break; }
-         bool idmMitigated = (idmMitBar != -1);
-         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
-
-         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
-         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
-         if(!InpOnlyLatestBOS)
-            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
 
          double runHigh = idmPrice; int runHighIdx = idmIdx;
          int bosBar = -1;
