@@ -35,6 +35,12 @@
 //|     masuk ke zona (OB/FVG) tsb -- tidak perlu body close.        |
 //|     Zona termitigasi digambar abu-abu, yang masih aktif diberi   |
 //|     warna solid.                                                 |
+//|  9. Bias (bullish/bearish) -- selama bias aktif ke satu arah,    |
+//|     jalur validasi arah LAWAN di-skip total (tidak dievaluasi    |
+//|     sama sekali), sampai ada CHoCH.                              |
+//| 10. CHoCH = saat bias bullish, candle body-close di BAWAH L-valid|
+//|     yang lagi jadi acuan -> bias flip ke bearish (dan            |
+//|     sebaliknya untuk bias bearish, body-close di ATAS H-valid).  |
 //+------------------------------------------------------------------+
 #property copyright "fx-mt5-ai-onnx-ea"
 #property version   "1.00"
@@ -87,6 +93,7 @@ input color InpColorOBBear       = clrOrange;
 input color InpColorFVGBull      = clrAqua;
 input color InpColorFVGBear      = clrMagenta;
 input color InpColorMitigated    = clrGray;
+input color InpColorChoch        = clrWhite; // Warna garis CHoCH (beda dari BOS biar kebeda)
 
 double bufHH[];
 double bufLH[];
@@ -201,6 +208,22 @@ void DrawBOS(datetime tFrom, datetime tTo, double price, int dir)
       ObjectSetInteger(0, txt, OBJPROP_COLOR, dir > 0 ? InpColorBOSUp : InpColorBOSDown);
       ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, InpLabelFontSize);
    }
+}
+
+void DrawChoch(datetime tFrom, datetime tTo, double price, int dir)
+{
+   string lname = OBJ_PREFIX + "CHOCHLINE_" + (string)tTo;
+   ObjectCreate(0, lname, OBJ_TREND, 0, tFrom, price, tTo, price);
+   ObjectSetInteger(0, lname, OBJPROP_COLOR, InpColorChoch);
+   ObjectSetInteger(0, lname, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, lname, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, lname, OBJPROP_WIDTH, 2);
+
+   string txt = OBJ_PREFIX + "CHOCHLBL_" + (string)tTo;
+   ObjectCreate(0, txt, OBJ_TEXT, 0, tTo, price);
+   ObjectSetString(0, txt, OBJPROP_TEXT, InpCompactMode ? "C" : (dir > 0 ? "CHoCH UP" : "CHoCH DOWN"));
+   ObjectSetInteger(0, txt, OBJPROP_COLOR, InpColorChoch);
+   ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, InpLabelFontSize);
 }
 
 int FindLastBearishBar(const double &open[], const double &close[], int fromIdx, int toIdx)
@@ -326,10 +349,20 @@ int OnCalculate(const int rates_total,
    bool haveIDM = false; datetime lastIDMTime = 0; double lastIDMPrice = 0;
    datetime lastIDMEndTime = 0; bool lastIDMMitigated = false;
 
+   // bias: 0 = belum ada arah yang established, 1 = bullish, -1 = bearish.
+   // Selama bias aktif ke satu arah, jalur validasi arah LAWAN di-skip total --
+   // sampai CHoCH beneran kejadian (body-close menembus L-valid/H-valid yang
+   // lagi jadi acuan) dan mem-flip bias-nya.
+   int bias = 0;
+   double activeLevelPrice = 0; int activeLevelIdx = -1;
+   int lastChochDir = 0; double lastChochLevel = 0; datetime lastChochTime = 0; datetime lastChochFromTime = 0;
+
    for(int p = 0; p < pivotCount - 1; p++)
    {
       if(pivots[p].isHigh && !pivots[p+1].isHigh)
       {
+         if(bias == -1) continue; // lagi bearish -- jalur bullish di-skip sampai ada CHoCH balik
+
          // Bullish path: swing high, then internal pullback low (inducement candidate)
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
@@ -404,6 +437,22 @@ int OnCalculate(const int rates_total,
                DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, 1);
             lastBOSDir = 1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
+            // L-valid ini sekarang jadi acuan aktif -- kalau nanti ada candle yang
+            // body-close di BAWAHnya, itu CHoCH (bullish -> bearish).
+            bias = 1;
+            activeLevelPrice = runLow; activeLevelIdx = runLowIdx;
+            int chochBar = -1;
+            for(int cb = bosBar + 1; cb <= lastBar; cb++)
+               if(close[cb] < activeLevelPrice) { chochBar = cb; break; }
+            if(chochBar != -1)
+            {
+               bias = -1;
+               lastChochDir = -1; lastChochLevel = activeLevelPrice;
+               lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
+               if(!InpOnlyLatestBOS)
+                  DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, -1);
+            }
+
             if(InpShowOB)
             {
                int obIdx = FindLastBearishBar(open, close, idmIdx, bosBar - 1);
@@ -453,6 +502,8 @@ int OnCalculate(const int rates_total,
       }
       else if(!pivots[p].isHigh && pivots[p+1].isHigh)
       {
+         if(bias == 1) continue; // lagi bullish -- jalur bearish di-skip sampai ada CHoCH balik
+
          // Bearish path: swing low, then internal pullback high (inducement candidate)
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
@@ -518,6 +569,22 @@ int OnCalculate(const int rates_total,
                DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, -1);
             lastBOSDir = -1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
+            // H-valid ini sekarang jadi acuan aktif -- kalau nanti ada candle yang
+            // body-close di ATASnya, itu CHoCH (bearish -> bullish).
+            bias = -1;
+            activeLevelPrice = runHigh; activeLevelIdx = runHighIdx;
+            int chochBar = -1;
+            for(int cb = bosBar + 1; cb <= lastBar; cb++)
+               if(close[cb] > activeLevelPrice) { chochBar = cb; break; }
+            if(chochBar != -1)
+            {
+               bias = 1;
+               lastChochDir = 1; lastChochLevel = activeLevelPrice;
+               lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
+               if(!InpOnlyLatestBOS)
+                  DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, 1);
+            }
+
             if(InpShowOB)
             {
                int obIdx = FindLastBullishBar(open, close, idmIdx, bosBar - 1);
@@ -573,13 +640,21 @@ int OnCalculate(const int rates_total,
          DrawInducement(lastIDMTime, lastIDMEndTime, lastIDMPrice, lastIDMMitigated);
       if(lastBOSDir != 0)
          DrawBOS(lastBOSFromTime, lastBOSTime, lastBOSLevel, lastBOSDir);
+      if(lastChochDir != 0)
+         DrawChoch(lastChochFromTime, lastChochTime, lastChochLevel, lastChochDir);
    }
 
-   string status = (lastBOSDir != 0)
-      ? "BOS terakhir: " + (lastBOSDir > 0 ? "BULLISH" : "BEARISH") +
+   string status = "Bias: " + (bias > 0 ? "BULLISH" : (bias < 0 ? "BEARISH" : "belum ada"));
+   status += (lastBOSDir != 0)
+      ? "\nBOS terakhir: " + (lastBOSDir > 0 ? "BULLISH" : "BEARISH") +
         " @ " + DoubleToString(lastBOSLevel, _Digits) +
         " (" + TimeToString(lastBOSTime, TIME_DATE|TIME_MINUTES) + ")"
-      : "BOS terakhir: belum ada";
+      : "\nBOS terakhir: belum ada";
+   status += (lastChochDir != 0)
+      ? "\nCHoCH terakhir: " + (lastChochDir > 0 ? "BULLISH" : "BEARISH") +
+        " @ " + DoubleToString(lastChochLevel, _Digits) +
+        " (" + TimeToString(lastChochTime, TIME_DATE|TIME_MINUTES) + ")"
+      : "\nCHoCH terakhir: belum ada";
 
    if(InpShowLegend)
       status += "\n" + InpLegendText;
