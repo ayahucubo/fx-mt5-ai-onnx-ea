@@ -459,6 +459,11 @@ int OnCalculate(const int rates_total,
                lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
                if(!InpOnlyLatestBOS)
                   DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, -1);
+               // Regime baru dimulai -- referensi low lama (dari struktur bullish
+               // yang baru saja dipatahkan) sudah tidak relevan buat nge-gate low
+               // pertama di regime bearish ini. Reset supaya low itu otomatis jadi
+               // baseline baru, bukan ditolak karena "belum lebih rendah" dari level lama.
+               haveLastValidLow = false;
             }
 
             if(InpShowOB)
@@ -594,6 +599,9 @@ int OnCalculate(const int rates_total,
                lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
                if(!InpOnlyLatestBOS)
                   DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, 1);
+               // Sama seperti bullish->bearish: reset referensi high lama dari
+               // struktur bearish yang baru dipatahkan.
+               haveLastValidHigh = false;
             }
 
             if(InpShowOB)
