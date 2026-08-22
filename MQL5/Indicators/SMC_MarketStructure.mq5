@@ -70,7 +70,7 @@ input bool  InpShowSwingLabels   = true;  // Tampilkan huruf H/L di titik swing 
 input bool  InpOnlyLatestBOS     = true;  // Cuma gambar BOS & inducement TERAKHIR (bukan semua history)
 input bool  InpHideMitigated     = true;  // Sembunyikan total OB/FVG yang sudah termitigasi (bukan digrayscale)
 input bool  InpShowLegend        = true;  // Tampilkan baris legenda di comment
-input string InpLegendText       = "H/L=huruf kedua HH-LH-HL-LL | titik kuning=inducement | garis putus=BOS | kotak=OB/FVG (abu-abu=termitigasi)"; // Teks legenda (bebas diubah)
+input string InpLegendText       = "H/L=huruf kedua HH-LH-HL-LL | garis titik-titik=inducement | garis putus=BOS (kuning/abu2=IDM belum/sudah termitigasi) | kotak=OB/FVG (abu-abu=termitigasi)"; // Teks legenda (bebas diubah)
 input color InpColorHH          = clrLime;
 input color InpColorLH           = clrOrange;
 input color InpColorHL           = clrDeepSkyBlue;
@@ -161,13 +161,23 @@ void DrawLabel(datetime t, double price, string text, color clr, bool above)
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, above ? ANCHOR_LOWER : ANCHOR_UPPER);
 }
 
-void DrawInducement(datetime t, double price)
+void DrawInducement(datetime tFrom, datetime tTo, double price, bool mitigated)
 {
-   string name = OBJ_PREFIX + "IDM_" + (string)t;
-   ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
-   ObjectSetString(0, name, OBJPROP_TEXT, InpCompactMode ? "." : "IDM");
-   ObjectSetInteger(0, name, OBJPROP_COLOR, InpColorIDM);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpCompactMode ? InpLabelFontSize + 4 : InpLabelFontSize);
+   string lname = OBJ_PREFIX + "IDMLINE_" + (string)tFrom;
+   ObjectCreate(0, lname, OBJ_TREND, 0, tFrom, price, tTo, price);
+   ObjectSetInteger(0, lname, OBJPROP_COLOR, mitigated ? InpColorMitigated : InpColorIDM);
+   ObjectSetInteger(0, lname, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, lname, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, lname, OBJPROP_WIDTH, 1);
+
+   if(!InpCompactMode)
+   {
+      string txt = OBJ_PREFIX + "IDMLBL_" + (string)tFrom;
+      ObjectCreate(0, txt, OBJ_TEXT, 0, tFrom, price);
+      ObjectSetString(0, txt, OBJPROP_TEXT, "IDM");
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, mitigated ? InpColorMitigated : InpColorIDM);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, InpLabelFontSize);
+   }
 }
 
 void DrawBOS(datetime tFrom, datetime tTo, double price, int dir)
@@ -310,6 +320,7 @@ int OnCalculate(const int rates_total,
    bool haveLastValidLow  = false; double lastValidLowPrice  = 0;
    int lastBOSDir = 0; double lastBOSLevel = 0; datetime lastBOSTime = 0; datetime lastBOSFromTime = 0;
    bool haveIDM = false; datetime lastIDMTime = 0; double lastIDMPrice = 0;
+   datetime lastIDMEndTime = 0; bool lastIDMMitigated = false;
 
    for(int p = 0; p < pivotCount - 1; p++)
    {
@@ -333,9 +344,17 @@ int OnCalculate(const int rates_total,
          lastValidHighPrice = pivots[p].price;
 
          bufIDM[idmIdx] = idmPrice;
+
+         int idmMitBar = -1;
+         for(int b = sweepBar; b <= lastBar; b++)
+            if(high[b] >= idmPrice) { idmMitBar = b; break; }
+         bool idmMitigated = (idmMitBar != -1);
+         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
+
          haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
          if(!InpOnlyLatestBOS)
-            DrawInducement(time[idmIdx], idmPrice);
+            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
 
          double runLow = idmPrice; int runLowIdx = idmIdx;
          int bosBar = -1;
@@ -427,9 +446,17 @@ int OnCalculate(const int rates_total,
          lastValidLowPrice = pivots[p].price;
 
          bufIDM[idmIdx] = idmPrice;
+
+         int idmMitBar = -1;
+         for(int b = sweepBar; b <= lastBar; b++)
+            if(low[b] <= idmPrice) { idmMitBar = b; break; }
+         bool idmMitigated = (idmMitBar != -1);
+         datetime idmEndTime = idmMitigated ? time[idmMitBar] : time[lastBar];
+
          haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         lastIDMEndTime = idmEndTime; lastIDMMitigated = idmMitigated;
          if(!InpOnlyLatestBOS)
-            DrawInducement(time[idmIdx], idmPrice);
+            DrawInducement(time[idmIdx], idmEndTime, idmPrice, idmMitigated);
 
          double runHigh = idmPrice; int runHighIdx = idmIdx;
          int bosBar = -1;
@@ -506,7 +533,7 @@ int OnCalculate(const int rates_total,
    if(InpOnlyLatestBOS)
    {
       if(haveIDM)
-         DrawInducement(lastIDMTime, lastIDMPrice);
+         DrawInducement(lastIDMTime, lastIDMEndTime, lastIDMPrice, lastIDMMitigated);
       if(lastBOSDir != 0)
          DrawBOS(lastBOSFromTime, lastBOSTime, lastBOSLevel, lastBOSDir);
    }
