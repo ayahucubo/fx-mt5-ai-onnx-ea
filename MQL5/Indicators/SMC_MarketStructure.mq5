@@ -78,7 +78,7 @@
 #property indicator_label11 "FVGBottom"
 #property indicator_type11  DRAW_NONE
 
-input int   InpSwingBars        = 2;     // Jumlah bar kiri/kanan untuk deteksi fractal swing
+input int   InpSwingBars        = 4;     // Jumlah bar kiri/kanan untuk deteksi fractal swing (2 kegampangan detect noise di M5, sudah divalidasi 4 lebih bersih)
 input int   InpMaxSweepBars     = 50;    // Batas maks bar menunggu sweep inducement (0 = tanpa batas)
 input bool  InpUseOnlyClosedBars = true;  // Hanya proses bar yang sudah close (hindari repaint)
 input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
