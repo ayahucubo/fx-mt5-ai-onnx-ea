@@ -37,7 +37,11 @@
 //|     warna solid.                                                 |
 //|  9. Bias (bullish/bearish) -- selama bias aktif ke satu arah,    |
 //|     jalur validasi arah LAWAN di-skip total (tidak dievaluasi    |
-//|     sama sekali), sampai ada CHoCH.                              |
+//|     sama sekali), sampai ada CHoCH. SELAIN itu, selama bias      |
+//|     bullish cuma high yang GENUINELY lebih tinggi dari H valid   |
+//|     terakhir yang dievaluasi (begitu juga low lebih rendah untuk |
+//|     bias bearish) -- high/low yang lebih rendah/tinggi bukan     |
+//|     noise valid, di-skip total, bukan cuma dikasih label beda.   |
 //| 10. CHoCH = saat bias bullish, candle body-close di BAWAH L-valid|
 //|     yang lagi jadi acuan -> bias flip ke bearish (dan            |
 //|     sebaliknya untuk bias bearish, body-close di ATAS H-valid).  |
@@ -402,11 +406,15 @@ int OnCalculate(const int rates_total,
 
          if(!idmSwept) continue; // belum ke-sweep -> H belum valid, belum ada setup
 
+         // Selama bias masih bullish, cuma high yang GENUINELY LEBIH TINGGI dari H
+         // valid terakhir yang relevan buat dievaluasi -- high yang lebih rendah itu
+         // bukan "LH" yang valid, dia cuma noise selama belum ada CHoCH yang
+         // memindahkan konteksnya ke bearish. Di-skip total, bukan cuma diberi label beda.
          bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
-         if(isHH) bufHH[pivots[p].idx] = pivots[p].price;
-         else     bufLH[pivots[p].idx] = pivots[p].price;
+         if(!isHH) continue;
+         bufHH[pivots[p].idx] = pivots[p].price;
          if(InpShowSwingLabels)
-            DrawLabel(time[pivots[p].idx], pivots[p].price, isHH ? "HH" : "LH", isHH ? InpColorHH : InpColorLH, true);
+            DrawLabel(time[pivots[p].idx], pivots[p].price, "HH", InpColorHH, true);
          haveLastValidHigh = true;
          lastValidHighPrice = pivots[p].price;
 
@@ -537,11 +545,14 @@ int OnCalculate(const int rates_total,
 
          if(!idmSwept) continue;
 
+         // Mirror bullish: selama bias masih bearish, cuma low yang GENUINELY LEBIH
+         // RENDAH dari L valid terakhir yang dievaluasi. Low yang lebih tinggi bukan
+         // "HL" yang valid di sini -- itu cuma noise sampai ada CHoCH balik ke bullish.
          bool isLL = !haveLastValidLow || pivots[p].price < lastValidLowPrice;
-         if(isLL) bufLL[pivots[p].idx] = pivots[p].price;
-         else     bufHL[pivots[p].idx] = pivots[p].price;
+         if(!isLL) continue;
+         bufLL[pivots[p].idx] = pivots[p].price;
          if(InpShowSwingLabels)
-            DrawLabel(time[pivots[p].idx], pivots[p].price, isLL ? "LL" : "HL", isLL ? InpColorLL : InpColorHL, false);
+            DrawLabel(time[pivots[p].idx], pivots[p].price, "LL", InpColorLL, false);
          haveLastValidLow = true;
          lastValidLowPrice = pivots[p].price;
 
