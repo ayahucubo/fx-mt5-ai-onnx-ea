@@ -374,9 +374,13 @@ int OnCalculate(const int rates_total,
          haveLastValidHigh = true;
          lastValidHighPrice = pivots[p].price;
 
+         // Sweep sudah confirmed di sini -- pencarian BOS TIDAK dibatasi windowEnd lagi.
+         // Konsolidasi panjang dengan beberapa candle yang cuma wick nembus (bukan body
+         // close) itu wajar; breakout body-close yang beneran boleh terjadi kapan saja
+         // setelahnya, bukan cuma sebelum pivot high kecil berikutnya kebentuk.
          double runLow = idmPrice; int runLowIdx = idmIdx;
          int bosBar = -1;
-         for(int b = idmIdx; b <= windowEnd; b++)
+         for(int b = idmIdx; b <= lastBar; b++)
          {
             if(low[b] < runLow) { runLow = low[b]; runLowIdx = b; }
             if(close[b] > pivots[p].price) { bosBar = b; break; }
@@ -484,9 +488,10 @@ int OnCalculate(const int rates_total,
          haveLastValidLow = true;
          lastValidLowPrice = pivots[p].price;
 
+         // Sama seperti jalur bullish: BOS tidak dibatasi windowEnd, cuma sweep-nya.
          double runHigh = idmPrice; int runHighIdx = idmIdx;
          int bosBar = -1;
-         for(int b = idmIdx; b <= windowEnd; b++)
+         for(int b = idmIdx; b <= lastBar; b++)
          {
             if(high[b] > runHigh) { runHigh = high[b]; runHighIdx = b; }
             if(close[b] < pivots[p].price) { bosBar = b; break; }
