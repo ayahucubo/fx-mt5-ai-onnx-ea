@@ -19,12 +19,24 @@
 //|  5. Hanya bar yang sudah close yang diproses (hindari repaint    |
 //|     akibat harga intrabar); indikator full-recompute tiap        |
 //|     panggilan OnCalculate demi correctness, bukan performa.      |
+//|  6. Order Block (POI) = candle berlawanan warna TERAKHIR di      |
+//|     dalam leg impulsif (dari titik inducement sampai bar BOS)    |
+//|     sebelum leg itu menutup dengan BOS. Zona = high-low candle   |
+//|     tsb (bukan cuma body). Fallback ke titik low/high valid      |
+//|     kalau tidak ada candle berlawanan warna di leg itu.          |
+//|  7. FVG = imbalance 3-candle standar di dalam leg yang sama      |
+//|     (low candle-3 > high candle-1 untuk bullish, kebalikannya    |
+//|     untuk bearish).                                              |
+//|  8. Mitigasi = begitu ada candle SETELAHNYA yang wick-nya balik  |
+//|     masuk ke zona (OB/FVG) tsb -- tidak perlu body close.        |
+//|     Zona termitigasi digambar abu-abu, yang masih aktif diberi   |
+//|     warna solid.                                                 |
 //+------------------------------------------------------------------+
 #property copyright "fx-mt5-ai-onnx-ea"
 #property version   "1.00"
 #property indicator_chart_window
-#property indicator_buffers 7
-#property indicator_plots   7
+#property indicator_buffers 11
+#property indicator_plots   11
 #property indicator_label1  "HH"
 #property indicator_type1   DRAW_NONE
 #property indicator_label2  "LH"
@@ -39,9 +51,19 @@
 #property indicator_type6   DRAW_NONE
 #property indicator_label7  "BOSLevel"
 #property indicator_type7   DRAW_NONE
+#property indicator_label8  "OBTop"
+#property indicator_type8   DRAW_NONE
+#property indicator_label9  "OBBottom"
+#property indicator_type9   DRAW_NONE
+#property indicator_label10 "FVGTop"
+#property indicator_type10  DRAW_NONE
+#property indicator_label11 "FVGBottom"
+#property indicator_type11  DRAW_NONE
 
 input int   InpSwingBars        = 2;     // Jumlah bar kiri/kanan untuk deteksi fractal swing
 input bool  InpUseOnlyClosedBars = true;  // Hanya proses bar yang sudah close (hindari repaint)
+input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
+input bool  InpShowFVG           = true;  // Tampilkan Fair Value Gap
 input color InpColorHH          = clrLime;
 input color InpColorLH           = clrOrange;
 input color InpColorHL           = clrDeepSkyBlue;
@@ -49,6 +71,11 @@ input color InpColorLL           = clrRed;
 input color InpColorIDM          = clrYellow;
 input color InpColorBOSUp        = clrLime;
 input color InpColorBOSDown      = clrRed;
+input color InpColorOBBull       = clrDeepSkyBlue;
+input color InpColorOBBear       = clrOrange;
+input color InpColorFVGBull      = clrAqua;
+input color InpColorFVGBear      = clrMagenta;
+input color InpColorMitigated    = clrGray;
 
 double bufHH[];
 double bufLH[];
@@ -57,6 +84,10 @@ double bufLL[];
 double bufIDM[];
 double bufBOSDir[];
 double bufBOSLevel[];
+double bufOBTop[];
+double bufOBBottom[];
+double bufFVGTop[];
+double bufFVGBottom[];
 
 #define OBJ_PREFIX "SMCMS_"
 
@@ -76,8 +107,12 @@ int OnInit()
    SetIndexBuffer(4, bufIDM,     INDICATOR_DATA);
    SetIndexBuffer(5, bufBOSDir,  INDICATOR_DATA);
    SetIndexBuffer(6, bufBOSLevel,INDICATOR_DATA);
+   SetIndexBuffer(7, bufOBTop,     INDICATOR_DATA);
+   SetIndexBuffer(8, bufOBBottom,  INDICATOR_DATA);
+   SetIndexBuffer(9, bufFVGTop,    INDICATOR_DATA);
+   SetIndexBuffer(10,bufFVGBottom, INDICATOR_DATA);
 
-   for(int i = 0; i < 7; i++)
+   for(int i = 0; i < 11; i++)
       PlotIndexSetDouble(i, PLOT_EMPTY_VALUE, EMPTY_VALUE);
 
    IndicatorSetString(INDICATOR_SHORTNAME, "SMC Market Structure");
@@ -141,6 +176,38 @@ void DrawBOS(datetime tFrom, datetime tTo, double price, int dir)
    ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
 }
 
+int FindLastBearishBar(const double &open[], const double &close[], int fromIdx, int toIdx)
+{
+   int found = -1;
+   for(int b = fromIdx; b <= toIdx; b++)
+      if(close[b] < open[b]) found = b;
+   return found;
+}
+
+int FindLastBullishBar(const double &open[], const double &close[], int fromIdx, int toIdx)
+{
+   int found = -1;
+   for(int b = fromIdx; b <= toIdx; b++)
+      if(close[b] > open[b]) found = b;
+   return found;
+}
+
+void DrawZone(string name, datetime t1, double top, datetime t2, double bottom, color clr, string label)
+{
+   ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, top, t2, bottom);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_FILL, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+
+   string txt = name + "_LBL";
+   ObjectCreate(0, txt, OBJ_TEXT, 0, t1, top);
+   ObjectSetString(0, txt, OBJPROP_TEXT, label);
+   ObjectSetInteger(0, txt, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_LOWER);
+}
+
 int OnCalculate(const int rates_total,
                  const int prev_calculated,
                  const datetime &time[],
@@ -166,6 +233,10 @@ int OnCalculate(const int rates_total,
       bufIDM[i] = EMPTY_VALUE;
       bufBOSDir[i] = EMPTY_VALUE;
       bufBOSLevel[i] = EMPTY_VALUE;
+      bufOBTop[i] = EMPTY_VALUE;
+      bufOBBottom[i] = EMPTY_VALUE;
+      bufFVGTop[i] = EMPTY_VALUE;
+      bufFVGBottom[i] = EMPTY_VALUE;
    }
    ObjectsDeleteAll(0, OBJ_PREFIX);
 
@@ -266,6 +337,44 @@ int OnCalculate(const int rates_total,
             bufBOSLevel[bosBar] = pivots[p].price;
             DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, 1);
             lastBOSDir = 1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar];
+
+            if(InpShowOB)
+            {
+               int obIdx = FindLastBearishBar(open, close, idmIdx, bosBar - 1);
+               if(obIdx == -1) obIdx = runLowIdx;
+               double obTop = high[obIdx];
+               double obBottom = low[obIdx];
+               bufOBTop[obIdx] = obTop;
+               bufOBBottom[obIdx] = obBottom;
+
+               int mitBar = -1;
+               for(int b = obIdx + 1; b <= lastBar; b++)
+                  if(low[b] <= obTop) { mitBar = b; break; }
+               datetime tEnd = (mitBar != -1) ? time[mitBar] : time[lastBar];
+               color obClr = (mitBar != -1) ? InpColorMitigated : InpColorOBBull;
+               DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+            }
+
+            if(InpShowFVG)
+            {
+               for(int b = idmIdx + 1; b < bosBar; b++)
+               {
+                  if(low[b+1] > high[b-1])
+                  {
+                     double fvgTop = low[b+1];
+                     double fvgBottom = high[b-1];
+                     bufFVGTop[b] = fvgTop;
+                     bufFVGBottom[b] = fvgBottom;
+
+                     int mitBar2 = -1;
+                     for(int c = b + 1; c <= lastBar; c++)
+                        if(low[c] <= fvgTop) { mitBar2 = c; break; }
+                     datetime tEnd2 = (mitBar2 != -1) ? time[mitBar2] : time[lastBar];
+                     color fvgClr = (mitBar2 != -1) ? InpColorMitigated : InpColorFVGBull;
+                     DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                  }
+               }
+            }
          }
       }
       else if(!pivots[p].isHigh && pivots[p+1].isHigh)
@@ -309,6 +418,44 @@ int OnCalculate(const int rates_total,
             bufBOSLevel[bosBar] = pivots[p].price;
             DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, -1);
             lastBOSDir = -1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar];
+
+            if(InpShowOB)
+            {
+               int obIdx = FindLastBullishBar(open, close, idmIdx, bosBar - 1);
+               if(obIdx == -1) obIdx = runHighIdx;
+               double obTop = high[obIdx];
+               double obBottom = low[obIdx];
+               bufOBTop[obIdx] = obTop;
+               bufOBBottom[obIdx] = obBottom;
+
+               int mitBar = -1;
+               for(int b = obIdx + 1; b <= lastBar; b++)
+                  if(high[b] >= obBottom) { mitBar = b; break; }
+               datetime tEnd = (mitBar != -1) ? time[mitBar] : time[lastBar];
+               color obClr = (mitBar != -1) ? InpColorMitigated : InpColorOBBear;
+               DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+            }
+
+            if(InpShowFVG)
+            {
+               for(int b = idmIdx + 1; b < bosBar; b++)
+               {
+                  if(high[b+1] < low[b-1])
+                  {
+                     double fvgTop = low[b-1];
+                     double fvgBottom = high[b+1];
+                     bufFVGTop[b] = fvgTop;
+                     bufFVGBottom[b] = fvgBottom;
+
+                     int mitBar2 = -1;
+                     for(int c = b + 1; c <= lastBar; c++)
+                        if(high[c] >= fvgBottom) { mitBar2 = c; break; }
+                     datetime tEnd2 = (mitBar2 != -1) ? time[mitBar2] : time[lastBar];
+                     color fvgClr = (mitBar2 != -1) ? InpColorMitigated : InpColorFVGBear;
+                     DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                  }
+               }
+            }
          }
       }
    }
