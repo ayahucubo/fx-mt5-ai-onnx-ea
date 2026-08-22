@@ -334,11 +334,14 @@ int OnCalculate(const int rates_total,
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
 
-         // Batasi pencarian sweep/BOS sampai pivot HIGH lawan berikutnya (pivots[p+2]).
-         // Kalau harga bikin high baru duluan sebelum sempat nge-sweep pullback ini,
-         // berarti memang tidak ada inducement lokal -- jangan divalidasi oleh sweep
-         // yang ketemu jauh di masa depan (leg yang sama sekali tidak relevan).
-         int windowEnd = (p + 2 < pivotCount) ? pivots[p+2].idx : lastBar;
+         // Batasi pencarian sweep sampai muncul pivot HIGH baru yang levelnya LEBIH
+         // TINGGI dari high ini (bukan sekadar pivot high apapun -- pivot minor yang
+         // masih lebih rendah itu wajar terjadi di tengah konsolidasi sebelum sweep-nya
+         // beneran kejadian, dan tidak boleh motong pencarian). Kalau ada high baru yang
+         // lebih ekstrem duluan sebelum sweep, baru dianggap leg ini stale/superseded.
+         int windowEnd = lastBar;
+         for(int p2 = p + 2; p2 < pivotCount; p2 += 2)
+            if(pivots[p2].price > pivots[p].price) { windowEnd = pivots[p2].idx; break; }
 
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
@@ -454,8 +457,11 @@ int OnCalculate(const int rates_total,
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
 
-         // Sama seperti jalur bullish: batasi sampai pivot LOW lawan berikutnya.
-         int windowEnd = (p + 2 < pivotCount) ? pivots[p+2].idx : lastBar;
+         // Sama seperti jalur bullish: baru dianggap stale kalau ada low baru yang
+         // LEBIH RENDAH dari low ini, bukan sekadar pivot low apapun.
+         int windowEnd = lastBar;
+         for(int p2 = p + 2; p2 < pivotCount; p2 += 2)
+            if(pivots[p2].price < pivots[p].price) { windowEnd = pivots[p2].idx; break; }
 
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
