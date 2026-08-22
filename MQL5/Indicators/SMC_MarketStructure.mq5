@@ -13,7 +13,11 @@
 //|     duluan sebelum sempat sweep, berarti tidak ada inducement    |
 //|     lokal -> leg itu di-skip (no inducement, no setup), TIDAK    |
 //|     ditunggu sampai ketemu sweep di masa depan yang tidak        |
-//|     relevan.                                                    |
+//|     relevan. Kalau high ini adalah puncak tertinggi sejauh ini   |
+//|     (tidak ada pivot lawan sama sekali), pencarian TETAP dibatasi|
+//|     InpMaxSweepBars -- tanpa ini, penurunan bertahap berhari-hari|
+//|     kemudian bisa "keitung" sweep padahal bukan inducement       |
+//|     genuine (yang harusnya relatif cepat/dekat).                 |
 //|  3. "Low valid"   = low terendah antara bar sweep sampai bar     |
 //|     BOS (body close di atas high valid). Kalau tidak ada         |
 //|     pullback tambahan, ini sama dengan titik inducement itu      |
@@ -75,6 +79,7 @@
 #property indicator_type11  DRAW_NONE
 
 input int   InpSwingBars        = 2;     // Jumlah bar kiri/kanan untuk deteksi fractal swing
+input int   InpMaxSweepBars     = 50;    // Batas maks bar menunggu sweep inducement (0 = tanpa batas)
 input bool  InpUseOnlyClosedBars = true;  // Hanya proses bar yang sudah close (hindari repaint)
 input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
 input bool  InpShowFVG           = true;  // Tampilkan Fair Value Gap
@@ -379,6 +384,13 @@ int OnCalculate(const int rates_total,
          int windowEnd = lastBar;
          for(int p2 = p + 2; p2 < pivotCount; p2 += 2)
             if(pivots[p2].price > pivots[p].price) { windowEnd = pivots[p2].idx; break; }
+         // Tambahan: kalau nggak ada pivot lawan yang lebih ekstrem (misal high ini
+         // puncak tertinggi sejauh ini), windowEnd default ke lastBar -- yang berarti
+         // penurunan bertahap berhari-hari kemudian bisa "keitung" sweep, padahal itu
+         // bukan inducement yang genuine (sweep harusnya relatif deket/cepat). Batasi
+         // juga dengan jumlah bar maksimum.
+         if(InpMaxSweepBars > 0)
+            windowEnd = MathMin(windowEnd, idmIdx + InpMaxSweepBars);
 
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
@@ -526,6 +538,8 @@ int OnCalculate(const int rates_total,
          int windowEnd = lastBar;
          for(int p2 = p + 2; p2 < pivotCount; p2 += 2)
             if(pivots[p2].price < pivots[p].price) { windowEnd = pivots[p2].idx; break; }
+         if(InpMaxSweepBars > 0)
+            windowEnd = MathMin(windowEnd, idmIdx + InpMaxSweepBars);
 
          int sweepBar = -1;
          for(int b = idmIdx + 1; b <= windowEnd; b++)
