@@ -66,6 +66,11 @@ input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
 input bool  InpShowFVG           = true;  // Tampilkan Fair Value Gap
 input bool  InpCompactMode       = true;  // Mode simpel: simbol/huruf tunggal, tanpa teks panjang
 input int   InpLabelFontSize     = 7;     // Ukuran font label
+input bool  InpShowSwingLabels   = true;  // Tampilkan huruf H/L di titik swing (HH/LH/HL/LL)
+input bool  InpOnlyLatestBOS     = true;  // Cuma gambar BOS & inducement TERAKHIR (bukan semua history)
+input bool  InpHideMitigated     = true;  // Sembunyikan total OB/FVG yang sudah termitigasi (bukan digrayscale)
+input bool  InpShowLegend        = true;  // Tampilkan baris legenda di comment
+input string InpLegendText       = "H/L=huruf kedua HH-LH-HL-LL | titik kuning=inducement | garis putus=BOS | kotak=OB/FVG (abu-abu=termitigasi)"; // Teks legenda (bebas diubah)
 input color InpColorHH          = clrLime;
 input color InpColorLH           = clrOrange;
 input color InpColorHL           = clrDeepSkyBlue;
@@ -303,7 +308,8 @@ int OnCalculate(const int rates_total,
    // --- Step 2: validate via inducement sweep + BOS, classify HH/LH/HL/LL ---
    bool haveLastValidHigh = false; double lastValidHighPrice = 0;
    bool haveLastValidLow  = false; double lastValidLowPrice  = 0;
-   int lastBOSDir = 0; double lastBOSLevel = 0; datetime lastBOSTime = 0;
+   int lastBOSDir = 0; double lastBOSLevel = 0; datetime lastBOSTime = 0; datetime lastBOSFromTime = 0;
+   bool haveIDM = false; datetime lastIDMTime = 0; double lastIDMPrice = 0;
 
    for(int p = 0; p < pivotCount - 1; p++)
    {
@@ -321,12 +327,15 @@ int OnCalculate(const int rates_total,
          bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
          if(isHH) bufHH[pivots[p].idx] = pivots[p].price;
          else     bufLH[pivots[p].idx] = pivots[p].price;
-         DrawLabel(time[pivots[p].idx], pivots[p].price, isHH ? "HH" : "LH", isHH ? InpColorHH : InpColorLH, true);
+         if(InpShowSwingLabels)
+            DrawLabel(time[pivots[p].idx], pivots[p].price, isHH ? "HH" : "LH", isHH ? InpColorHH : InpColorLH, true);
          haveLastValidHigh = true;
          lastValidHighPrice = pivots[p].price;
 
          bufIDM[idmIdx] = idmPrice;
-         DrawInducement(time[idmIdx], idmPrice);
+         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         if(!InpOnlyLatestBOS)
+            DrawInducement(time[idmIdx], idmPrice);
 
          double runLow = idmPrice; int runLowIdx = idmIdx;
          int bosBar = -1;
@@ -340,14 +349,16 @@ int OnCalculate(const int rates_total,
             bool isHL = !haveLastValidLow || runLow > lastValidLowPrice;
             if(isHL) bufHL[runLowIdx] = runLow;
             else     bufLL[runLowIdx] = runLow;
-            DrawLabel(time[runLowIdx], runLow, isHL ? "HL" : "LL", isHL ? InpColorHL : InpColorLL, false);
+            if(InpShowSwingLabels)
+               DrawLabel(time[runLowIdx], runLow, isHL ? "HL" : "LL", isHL ? InpColorHL : InpColorLL, false);
             haveLastValidLow = true;
             lastValidLowPrice = runLow;
 
             bufBOSDir[bosBar] = 1;
             bufBOSLevel[bosBar] = pivots[p].price;
-            DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, 1);
-            lastBOSDir = 1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar];
+            if(!InpOnlyLatestBOS)
+               DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, 1);
+            lastBOSDir = 1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
             if(InpShowOB)
             {
@@ -361,9 +372,13 @@ int OnCalculate(const int rates_total,
                int mitBar = -1;
                for(int b = obIdx + 1; b <= lastBar; b++)
                   if(low[b] <= obTop) { mitBar = b; break; }
-               datetime tEnd = (mitBar != -1) ? time[mitBar] : time[lastBar];
-               color obClr = (mitBar != -1) ? InpColorMitigated : InpColorOBBull;
-               DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+               bool obMitigated = (mitBar != -1);
+               if(!obMitigated || !InpHideMitigated)
+               {
+                  datetime tEnd = obMitigated ? time[mitBar] : time[lastBar];
+                  color obClr = obMitigated ? InpColorMitigated : InpColorOBBull;
+                  DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+               }
             }
 
             if(InpShowFVG)
@@ -380,9 +395,13 @@ int OnCalculate(const int rates_total,
                      int mitBar2 = -1;
                      for(int c = b + 1; c <= lastBar; c++)
                         if(low[c] <= fvgTop) { mitBar2 = c; break; }
-                     datetime tEnd2 = (mitBar2 != -1) ? time[mitBar2] : time[lastBar];
-                     color fvgClr = (mitBar2 != -1) ? InpColorMitigated : InpColorFVGBull;
-                     DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                     bool fvgMitigated = (mitBar2 != -1);
+                     if(!fvgMitigated || !InpHideMitigated)
+                     {
+                        datetime tEnd2 = fvgMitigated ? time[mitBar2] : time[lastBar];
+                        color fvgClr = fvgMitigated ? InpColorMitigated : InpColorFVGBull;
+                        DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                     }
                   }
                }
             }
@@ -402,12 +421,15 @@ int OnCalculate(const int rates_total,
          bool isLL = !haveLastValidLow || pivots[p].price < lastValidLowPrice;
          if(isLL) bufLL[pivots[p].idx] = pivots[p].price;
          else     bufHL[pivots[p].idx] = pivots[p].price;
-         DrawLabel(time[pivots[p].idx], pivots[p].price, isLL ? "LL" : "HL", isLL ? InpColorLL : InpColorHL, false);
+         if(InpShowSwingLabels)
+            DrawLabel(time[pivots[p].idx], pivots[p].price, isLL ? "LL" : "HL", isLL ? InpColorLL : InpColorHL, false);
          haveLastValidLow = true;
          lastValidLowPrice = pivots[p].price;
 
          bufIDM[idmIdx] = idmPrice;
-         DrawInducement(time[idmIdx], idmPrice);
+         haveIDM = true; lastIDMTime = time[idmIdx]; lastIDMPrice = idmPrice;
+         if(!InpOnlyLatestBOS)
+            DrawInducement(time[idmIdx], idmPrice);
 
          double runHigh = idmPrice; int runHighIdx = idmIdx;
          int bosBar = -1;
@@ -421,14 +443,16 @@ int OnCalculate(const int rates_total,
             bool isLH = !haveLastValidHigh || runHigh < lastValidHighPrice;
             if(isLH) bufLH[runHighIdx] = runHigh;
             else     bufHH[runHighIdx] = runHigh;
-            DrawLabel(time[runHighIdx], runHigh, isLH ? "LH" : "HH", isLH ? InpColorLH : InpColorHH, true);
+            if(InpShowSwingLabels)
+               DrawLabel(time[runHighIdx], runHigh, isLH ? "LH" : "HH", isLH ? InpColorLH : InpColorHH, true);
             haveLastValidHigh = true;
             lastValidHighPrice = runHigh;
 
             bufBOSDir[bosBar] = -1;
             bufBOSLevel[bosBar] = pivots[p].price;
-            DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, -1);
-            lastBOSDir = -1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar];
+            if(!InpOnlyLatestBOS)
+               DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, -1);
+            lastBOSDir = -1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
             if(InpShowOB)
             {
@@ -442,9 +466,13 @@ int OnCalculate(const int rates_total,
                int mitBar = -1;
                for(int b = obIdx + 1; b <= lastBar; b++)
                   if(high[b] >= obBottom) { mitBar = b; break; }
-               datetime tEnd = (mitBar != -1) ? time[mitBar] : time[lastBar];
-               color obClr = (mitBar != -1) ? InpColorMitigated : InpColorOBBear;
-               DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+               bool obMitigated = (mitBar != -1);
+               if(!obMitigated || !InpHideMitigated)
+               {
+                  datetime tEnd = obMitigated ? time[mitBar] : time[lastBar];
+                  color obClr = obMitigated ? InpColorMitigated : InpColorOBBear;
+                  DrawZone(OBJ_PREFIX + "OB_" + (string)time[obIdx], time[obIdx], obTop, tEnd, obBottom, obClr, "OB");
+               }
             }
 
             if(InpShowFVG)
@@ -461,14 +489,26 @@ int OnCalculate(const int rates_total,
                      int mitBar2 = -1;
                      for(int c = b + 1; c <= lastBar; c++)
                         if(high[c] >= fvgBottom) { mitBar2 = c; break; }
-                     datetime tEnd2 = (mitBar2 != -1) ? time[mitBar2] : time[lastBar];
-                     color fvgClr = (mitBar2 != -1) ? InpColorMitigated : InpColorFVGBear;
-                     DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                     bool fvgMitigated = (mitBar2 != -1);
+                     if(!fvgMitigated || !InpHideMitigated)
+                     {
+                        datetime tEnd2 = fvgMitigated ? time[mitBar2] : time[lastBar];
+                        color fvgClr = fvgMitigated ? InpColorMitigated : InpColorFVGBear;
+                        DrawZone(OBJ_PREFIX + "FVG_" + (string)time[b], time[b-1], fvgTop, tEnd2, fvgBottom, fvgClr, "FVG");
+                     }
                   }
                }
             }
          }
       }
+   }
+
+   if(InpOnlyLatestBOS)
+   {
+      if(haveIDM)
+         DrawInducement(lastIDMTime, lastIDMPrice);
+      if(lastBOSDir != 0)
+         DrawBOS(lastBOSFromTime, lastBOSTime, lastBOSLevel, lastBOSDir);
    }
 
    string status = (lastBOSDir != 0)
@@ -477,8 +517,8 @@ int OnCalculate(const int rates_total,
         " (" + TimeToString(lastBOSTime, TIME_DATE|TIME_MINUTES) + ")"
       : "BOS terakhir: belum ada";
 
-   if(InpCompactMode)
-      status += "\nLegenda: H/L=huruf kedua HH-LH-HL-LL (warna=lime HH, oranye LH, biru HL, merah LL) | titik kuning=inducement | garis putus hijau/merah=BOS | kotak biru-oranye=OB, aqua-magenta=FVG, abu-abu=termitigasi";
+   if(InpShowLegend)
+      status += "\n" + InpLegendText;
 
    Comment(status);
 
