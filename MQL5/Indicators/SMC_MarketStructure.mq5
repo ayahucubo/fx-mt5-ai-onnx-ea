@@ -64,6 +64,8 @@ input int   InpSwingBars        = 2;     // Jumlah bar kiri/kanan untuk deteksi 
 input bool  InpUseOnlyClosedBars = true;  // Hanya proses bar yang sudah close (hindari repaint)
 input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
 input bool  InpShowFVG           = true;  // Tampilkan Fair Value Gap
+input bool  InpCompactMode       = true;  // Mode simpel: simbol/huruf tunggal, tanpa teks panjang
+input int   InpLabelFontSize     = 7;     // Ukuran font label
 input color InpColorHH          = clrLime;
 input color InpColorLH           = clrOrange;
 input color InpColorHL           = clrDeepSkyBlue;
@@ -143,11 +145,14 @@ bool IsFractalLow(const double &low[], int i, int n, int lastBar)
 
 void DrawLabel(datetime t, double price, string text, color clr, bool above)
 {
+   // Ambil huruf KEDUA ("HH"/"LH" -> "H", "HL"/"LL" -> "L") supaya compact text
+   // menunjukkan tipe pivot (high/low); perbandingan naik/turunnya tetap dibawa oleh warna.
+   string shown = InpCompactMode ? StringSubstr(text, 1, 1) : text;
    string name = OBJ_PREFIX + "LBL_" + (string)t + "_" + text;
    ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
-   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_TEXT, shown);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpLabelFontSize);
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, above ? ANCHOR_LOWER : ANCHOR_UPPER);
 }
 
@@ -155,9 +160,9 @@ void DrawInducement(datetime t, double price)
 {
    string name = OBJ_PREFIX + "IDM_" + (string)t;
    ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
-   ObjectSetString(0, name, OBJPROP_TEXT, "IDM");
+   ObjectSetString(0, name, OBJPROP_TEXT, InpCompactMode ? "." : "IDM");
    ObjectSetInteger(0, name, OBJPROP_COLOR, InpColorIDM);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 7);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpCompactMode ? InpLabelFontSize + 4 : InpLabelFontSize);
 }
 
 void DrawBOS(datetime tFrom, datetime tTo, double price, int dir)
@@ -169,11 +174,14 @@ void DrawBOS(datetime tFrom, datetime tTo, double price, int dir)
    ObjectSetInteger(0, lname, OBJPROP_RAY_RIGHT, false);
    ObjectSetInteger(0, lname, OBJPROP_WIDTH, 1);
 
-   string txt = OBJ_PREFIX + "BOSLBL_" + (string)tTo;
-   ObjectCreate(0, txt, OBJ_TEXT, 0, tTo, price);
-   ObjectSetString(0, txt, OBJPROP_TEXT, dir > 0 ? "BOS UP" : "BOS DOWN");
-   ObjectSetInteger(0, txt, OBJPROP_COLOR, dir > 0 ? InpColorBOSUp : InpColorBOSDown);
-   ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 8);
+   if(!InpCompactMode)
+   {
+      string txt = OBJ_PREFIX + "BOSLBL_" + (string)tTo;
+      ObjectCreate(0, txt, OBJ_TEXT, 0, tTo, price);
+      ObjectSetString(0, txt, OBJPROP_TEXT, dir > 0 ? "BOS UP" : "BOS DOWN");
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, dir > 0 ? InpColorBOSUp : InpColorBOSDown);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, InpLabelFontSize);
+   }
 }
 
 int FindLastBearishBar(const double &open[], const double &close[], int fromIdx, int toIdx)
@@ -200,12 +208,15 @@ void DrawZone(string name, datetime t1, double top, datetime t2, double bottom, 
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
    ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
 
-   string txt = name + "_LBL";
-   ObjectCreate(0, txt, OBJ_TEXT, 0, t1, top);
-   ObjectSetString(0, txt, OBJPROP_TEXT, label);
-   ObjectSetInteger(0, txt, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, 7);
-   ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_LOWER);
+   if(!InpCompactMode)
+   {
+      string txt = name + "_LBL";
+      ObjectCreate(0, txt, OBJ_TEXT, 0, t1, top);
+      ObjectSetString(0, txt, OBJPROP_TEXT, label);
+      ObjectSetInteger(0, txt, OBJPROP_COLOR, clr);
+      ObjectSetInteger(0, txt, OBJPROP_FONTSIZE, InpLabelFontSize);
+      ObjectSetInteger(0, txt, OBJPROP_ANCHOR, ANCHOR_LOWER);
+   }
 }
 
 int OnCalculate(const int rates_total,
@@ -460,12 +471,16 @@ int OnCalculate(const int rates_total,
       }
    }
 
-   if(lastBOSDir != 0)
-      Comment("BOS terakhir: ", lastBOSDir > 0 ? "BULLISH" : "BEARISH",
-              " @ ", DoubleToString(lastBOSLevel, _Digits),
-              " (", TimeToString(lastBOSTime, TIME_DATE|TIME_MINUTES), ")");
-   else
-      Comment("BOS terakhir: belum ada");
+   string status = (lastBOSDir != 0)
+      ? "BOS terakhir: " + (lastBOSDir > 0 ? "BULLISH" : "BEARISH") +
+        " @ " + DoubleToString(lastBOSLevel, _Digits) +
+        " (" + TimeToString(lastBOSTime, TIME_DATE|TIME_MINUTES) + ")"
+      : "BOS terakhir: belum ada";
+
+   if(InpCompactMode)
+      status += "\nLegenda: H/L=huruf kedua HH-LH-HL-LL (warna=lime HH, oranye LH, biru HL, merah LL) | titik kuning=inducement | garis putus hijau/merah=BOS | kotak biru-oranye=OB, aqua-magenta=FVG, abu-abu=termitigasi";
+
+   Comment(status);
 
    return rates_total;
 }
