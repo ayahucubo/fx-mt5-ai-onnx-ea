@@ -8,8 +8,12 @@
 //| Rule yang di-encode (bullish; bearish adalah cerminnya):          |
 //|  1. Swing high/low dideteksi via fractal N-bar (kiri & kanan).   |
 //|  2. "High valid"  = swing high yang inducement (internal low     |
-//|     setelahnya) berhasil di-sweep oleh wick (low candle > later  |
-//|     menembus di bawah level inducement).                        |
+//|     setelahnya) berhasil di-sweep oleh wick SEBELUM pivot high   |
+//|     lawan berikutnya terbentuk. Kalau harga bikin high baru      |
+//|     duluan sebelum sempat sweep, berarti tidak ada inducement    |
+//|     lokal -> leg itu di-skip (no inducement, no setup), TIDAK    |
+//|     ditunggu sampai ketemu sweep di masa depan yang tidak        |
+//|     relevan.                                                    |
 //|  3. "Low valid"   = low terendah antara bar sweep sampai bar     |
 //|     BOS (body close di atas high valid). Kalau tidak ada         |
 //|     pullback tambahan, ini sama dengan titik inducement itu      |
@@ -330,10 +334,16 @@ int OnCalculate(const int rates_total,
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
 
+         // Batasi pencarian sweep/BOS sampai pivot HIGH lawan berikutnya (pivots[p+2]).
+         // Kalau harga bikin high baru duluan sebelum sempat nge-sweep pullback ini,
+         // berarti memang tidak ada inducement lokal -- jangan divalidasi oleh sweep
+         // yang ketemu jauh di masa depan (leg yang sama sekali tidak relevan).
+         int windowEnd = (p + 2 < pivotCount) ? pivots[p+2].idx : lastBar;
+
          int sweepBar = -1;
-         for(int b = idmIdx + 1; b <= lastBar; b++)
+         for(int b = idmIdx + 1; b <= windowEnd; b++)
             if(low[b] < idmPrice) { sweepBar = b; break; }
-         if(sweepBar == -1) continue; // inducement not swept yet
+         if(sweepBar == -1) continue; // tidak ada sweep lokal -> no inducement, no setup
 
          bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
          if(isHH) bufHH[pivots[p].idx] = pivots[p].price;
@@ -358,7 +368,7 @@ int OnCalculate(const int rates_total,
 
          double runLow = idmPrice; int runLowIdx = idmIdx;
          int bosBar = -1;
-         for(int b = idmIdx; b <= lastBar; b++)
+         for(int b = idmIdx; b <= windowEnd; b++)
          {
             if(low[b] < runLow) { runLow = low[b]; runLowIdx = b; }
             if(close[b] > pivots[p].price) { bosBar = b; break; }
@@ -432,8 +442,11 @@ int OnCalculate(const int rates_total,
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
 
+         // Sama seperti jalur bullish: batasi sampai pivot LOW lawan berikutnya.
+         int windowEnd = (p + 2 < pivotCount) ? pivots[p+2].idx : lastBar;
+
          int sweepBar = -1;
-         for(int b = idmIdx + 1; b <= lastBar; b++)
+         for(int b = idmIdx + 1; b <= windowEnd; b++)
             if(high[b] > idmPrice) { sweepBar = b; break; }
          if(sweepBar == -1) continue;
 
@@ -460,7 +473,7 @@ int OnCalculate(const int rates_total,
 
          double runHigh = idmPrice; int runHighIdx = idmIdx;
          int bosBar = -1;
-         for(int b = idmIdx; b <= lastBar; b++)
+         for(int b = idmIdx; b <= windowEnd; b++)
          {
             if(high[b] > runHigh) { runHigh = high[b]; runHighIdx = b; }
             if(close[b] < pivots[p].price) { bosBar = b; break; }
