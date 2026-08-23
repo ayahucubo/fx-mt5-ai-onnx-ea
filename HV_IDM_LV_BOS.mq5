@@ -56,7 +56,7 @@ enum ENUM_BIAS
 
 input ENUM_BIAS InpBias        = BIAS_BULLISH; // Bias
 input datetime  InpStartTime   = 0;            // Start time (0 = auto from InpMaxBars)
-input int       InpSwingLength = 2;            // Fractal swing length (bars each side)
+input int       InpSwingLength = 3;            // Fractal swing length (bars each side)
 input int       InpMaxBars     = 3000;         // How many bars back to scan (used when InpStartTime=0)
 input color     InpColorIDM    = clrOrange;    // IDM (live) color
 input color     InpColorFirst  = clrDodgerBlue;// First-confirmed point color (HV in bull, LV in bear)
@@ -136,6 +136,40 @@ void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color 
   }
 
 //+------------------------------------------------------------------+
+//| Is bar i a fractal high of Arr[], looking back/forward InpSwingLength
+//| bars each way - but the backward side never looks earlier than
+//| backLimit (the bar the current leg's tracking started from). Without
+//| this clip, a pivot check can reach back across a leg boundary into
+//| unrelated older price action (e.g. the deep low that started the
+//| PREVIOUS leg) and get wrongly disqualified by it, or - the opposite
+//| failure - let a real peak masquerade as "the" candidate because a
+//| taller peak from the same old context sits just past a fixed window.
+//+------------------------------------------------------------------+
+bool IsPivotHighClipped(const double &Arr[], int i, int backLimit, int len, int sl)
+  {
+   if(i - sl < 0 || i + sl >= len)
+      return false;
+   int backStart = MathMax(backLimit, i - sl);
+   for(int k = backStart; k < i; k++)
+      if(Arr[k] >= Arr[i]) return false;
+   for(int k = i + 1; k <= i + sl; k++)
+      if(Arr[k] >= Arr[i]) return false;
+   return true;
+  }
+
+bool IsPivotLowClipped(const double &Arr[], int i, int backLimit, int len, int sl)
+  {
+   if(i - sl < 0 || i + sl >= len)
+      return false;
+   int backStart = MathMax(backLimit, i - sl);
+   for(int k = backStart; k < i; k++)
+      if(Arr[k] <= Arr[i]) return false;
+   for(int k = i + 1; k <= i + sl; k++)
+      if(Arr[k] <= Arr[i]) return false;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
                  const int prev_calculated,
                  const datetime &time[],
@@ -188,29 +222,15 @@ int OnCalculate(const int rates_total,
      }
 
    int sl = InpSwingLength;
-   bool pivotCand[], pivotOpp[];
-   ArrayResize(pivotCand, len);
-   ArrayResize(pivotOpp, len);
-   ArrayInitialize(pivotCand, false);
-   ArrayInitialize(pivotOpp, false);
-   for(int i = sl; i < len - sl; i++)
-     {
-      bool pc = true, po = true;
-      for(int k = 1; k <= sl; k++)
-        {
-         if(!(Hi[i] > Hi[i - k] && Hi[i] > Hi[i + k])) pc = false;
-         if(!(Lo[i] < Lo[i - k] && Lo[i] < Lo[i + k])) po = false;
-        }
-      pivotCand[i] = pc;
-      pivotOpp[i]  = po;
-     }
 
    string firstLbl = g_bull ? "HV" : "LV";
    string secondLbl = g_bull ? "LV" : "HV";
 
+   // seed the very first candidate from the very first pivot found, using
+   // the scan window's own start as the back-limit (nothing before it exists).
    int firstIdx = -1;
    for(int i = sl; i < len - sl; i++)
-      if(pivotCand[i]) { firstIdx = i; break; }
+      if(IsPivotHighClipped(Hi, i, 0, len, sl)) { firstIdx = i; break; }
    if(firstIdx < 0)
       return(rates_total);
 
@@ -238,7 +258,7 @@ int OnCalculate(const int rates_total,
      {
       if(phase == "seek_first")
         {
-         if(pivotOpp[i] && (!shadow.valid || Lo[i] < shadow.value))
+         if(IsPivotLowClipped(Lo, i, candidate.idx, len, sl) && (!shadow.valid || Lo[i] < shadow.value))
            {
             MakeExtreme(shadow, i, Lo[i]);
             liveIdm = shadow; haveLiveIdm = true;
@@ -253,7 +273,7 @@ int OnCalculate(const int rates_total,
             continue;
            }
 
-         if(pivotCand[i] && Hi[i] > candidate.value)
+         if(IsPivotHighClipped(Hi, i, candidate.idx, len, sl) && Hi[i] > candidate.value)
            {
             if(shadow.valid)
               {
