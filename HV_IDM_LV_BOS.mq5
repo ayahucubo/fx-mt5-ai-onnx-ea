@@ -10,10 +10,12 @@
 //|  vice versa; the point confirmed first is LV instead of HV, and     |
 //|  the point confirmed second is HV instead of LV.                    |
 //|                                                                    |
-//|   candidate (internal, not drawn) - a fractal swing-high candidate.|
-//|                         It becomes the active candidate whenever    |
-//|                         its price is higher than the currently      |
-//|                         active one.                                  |
+//|   candidate (internal, not drawn) - simply the running highest high |
+//|                         since the leg started. It extends on ANY     |
+//|                         new bar whose high exceeds it - no fractal   |
+//|                         confirmation needed, since it's just "the     |
+//|                         best high seen so far", not a claim that      |
+//|                         nothing will ever exceed it later.            |
 //|   IDM (Inducement)   - the lowest fractal swing-low since the       |
 //|                         active candidate's last update. Shown LIVE  |
 //|                         as soon as a pullback forms, before knowing |
@@ -137,27 +139,14 @@ void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color 
   }
 
 //+------------------------------------------------------------------+
-//| Is bar i a fractal high of Arr[], looking back/forward InpSwingLength
+//| Is bar i a fractal low of Arr[], looking back/forward InpSwingLength
 //| bars each way - but the backward side never looks earlier than
-//| backLimit (the bar the current leg's tracking started from). Without
-//| this clip, a pivot check can reach back across a leg boundary into
-//| unrelated older price action (e.g. the deep low that started the
-//| PREVIOUS leg) and get wrongly disqualified by it, or - the opposite
-//| failure - let a real peak masquerade as "the" candidate because a
-//| taller peak from the same old context sits just past a fixed window.
+//| backLimit (the bar the current leg's candidate tracking started
+//| from, which moves forward every time the candidate itself updates).
+//| Without this clip, a pivot check can reach back across a leg
+//| boundary into unrelated older price action (e.g. the deep low that
+//| started the PREVIOUS leg) and get wrongly disqualified by it.
 //+------------------------------------------------------------------+
-bool IsPivotHighClipped(const double &Arr[], int i, int backLimit, int len, int sl)
-  {
-   if(i - sl < 0 || i + sl >= len)
-      return false;
-   int backStart = MathMax(backLimit, i - sl);
-   for(int k = backStart; k < i; k++)
-      if(Arr[k] >= Arr[i]) return false;
-   for(int k = i + 1; k <= i + sl; k++)
-      if(Arr[k] >= Arr[i]) return false;
-   return true;
-  }
-
 bool IsPivotLowClipped(const double &Arr[], int i, int backLimit, int len, int sl)
   {
    if(i - sl < 0 || i + sl >= len)
@@ -227,13 +216,9 @@ int OnCalculate(const int rates_total,
    string firstLbl = g_bull ? "HV" : "LV";
    string secondLbl = g_bull ? "LV" : "HV";
 
-   // seed the very first candidate from the very first pivot found, using
-   // the scan window's own start as the back-limit (nothing before it exists).
-   int firstIdx = -1;
-   for(int i = sl; i < len - sl; i++)
-      if(IsPivotHighClipped(Hi, i, 0, len, sl)) { firstIdx = i; break; }
-   if(firstIdx < 0)
-      return(rates_total);
+   // seed the candidate from the very first bar of the scan window - it's
+   // just "the running high so far", so it needs no pivot confirmation.
+   int firstIdx = 0;
 
    int legN = 0;
 
@@ -274,7 +259,7 @@ int OnCalculate(const int rates_total,
             continue;
            }
 
-         if(IsPivotHighClipped(Hi, i, candidate.idx, len, sl) && Hi[i] > candidate.value)
+         if(Hi[i] > candidate.value)
            {
             if(shadow.valid)
               {
