@@ -62,6 +62,7 @@ input color     InpColorIDM    = clrOrange;    // IDM (live) color
 input color     InpColorFirst  = clrDodgerBlue;// First-confirmed point color (HV in bull, LV in bear)
 input color     InpColorSecond = clrMagenta;   // Second-confirmed point color (LV in bull, HV in bear)
 input color     InpColorBOS    = clrLime;      // BOS / reference line color
+input color     InpColorPending= clrAqua;      // Pending (confirmed but its own leg isn't closed yet) point color
 input int       InpFontSize    = 9;
 
 #define PFX "HVIDM_"
@@ -327,6 +328,14 @@ int OnCalculate(const int rates_total,
       DrawRefLine(PFX + "BOSline", T[bosFromIdx], T[bosIdx], ToReal(bosLevel), InpColorBOS);
       DrawLabel(PFX + "BOS", T[bosIdx], ToReal(bosLevel), "BOS", InpColorBOS, g_bull);
      }
+   // if the most recent HV has already been confirmed (its IDM got swept)
+   // but its own LV/BOS hasn't happened yet, it's real and worth showing -
+   // just not as part of the "lastFirst/lastSecond" matched pair above,
+   // since that pair only ever updates once a leg fully closes. Drawn with
+   // its own color/text so it never gets confused with a confirmed, paired HV.
+   if(phase == "seek_second" && pendingFirst.valid)
+      DrawLabel(PFX + firstLbl + "_pending", T[pendingFirst.idx], ToReal(pendingFirst.value),
+                firstLbl + " (pending)", InpColorPending, g_bull);
 
    return(rates_total);
   }
