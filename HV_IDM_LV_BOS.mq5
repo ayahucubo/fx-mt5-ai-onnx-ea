@@ -214,20 +214,24 @@ int OnCalculate(const int rates_total,
    if(firstIdx < 0)
       return(rates_total);
 
-   int firstN = 0, secondN = 0;
+   int legN = 0;
 
    SExtreme candidate;    MakeExtreme(candidate, firstIdx, Hi[firstIdx]);
    SExtreme shadow;       shadow.valid = false;
    SExtreme lockedOpp;    lockedOpp.valid = false;
    SExtreme secondPoint;  secondPoint.valid = false;
    SExtreme reference;    reference.valid = false;
+   SExtreme pendingFirst; pendingFirst.valid = false; // HV confirmed, but its own LV/BOS hasn't happened yet
    string phase = "seek_first";
 
    // rolling "latest state" - only these get drawn, at the very end, so the
    // chart never shows more than one of each even across thousands of bars.
+   // HV/LV/BOS are only ever updated TOGETHER, as one atomic triplet, exactly
+   // when a leg's BOS confirms - so the chart never shows a mismatched pair
+   // (a brand new HV that's still waiting on its own LV sitting next to a
+   // stale LV left over from a completely different, earlier leg).
    bool     haveLiveIdm = false; SExtreme liveIdm;
-   bool     haveFirst = false;   SExtreme lastFirst;   int lastFirstN = 0;
-   bool     haveSecond = false;  SExtreme lastSecond;  int lastSecondN = 0;
+   bool     haveLeg = false;     SExtreme lastFirst, lastSecond; int lastLegN = 0;
    bool     haveBos = false;     int bosFromIdx = -1, bosIdx = -1; double bosLevel = 0;
 
    for(int i = firstIdx + 1; i < len - sl; i++)
@@ -242,8 +246,7 @@ int OnCalculate(const int rates_total,
 
          if(lockedOpp.valid && Lo[i] < lockedOpp.value)
            {
-            firstN++;
-            lastFirst = candidate; lastFirstN = firstN; haveFirst = true;
+            MakeExtreme(pendingFirst, candidate.idx, candidate.value);
             phase = "seek_second";
             MakeExtreme(secondPoint, i, Lo[i]);
             MakeExtreme(reference, candidate.idx, candidate.value);
@@ -268,8 +271,8 @@ int OnCalculate(const int rates_total,
 
          if(Cl[i] > reference.value)
            {
-            secondN++;
-            lastSecond = secondPoint; lastSecondN = secondN; haveSecond = true;
+            legN++;
+            lastFirst = pendingFirst; lastSecond = secondPoint; lastLegN = legN; haveLeg = true;
             bosFromIdx = reference.idx; bosIdx = i; bosLevel = reference.value;
             haveBos = true;
 
@@ -292,12 +295,13 @@ int OnCalculate(const int rates_total,
       // misleadingly imply it's already the same thing as a specific locked IDM.
       DrawLabel(PFX + "IDM", T[liveIdm.idx], ToReal(liveIdm.value),
                 "IDM", InpColorIDM, !g_bull);
-   if(haveFirst)
+   if(haveLeg)
+     {
       DrawLabel(PFX + firstLbl, T[lastFirst.idx], ToReal(lastFirst.value),
-                firstLbl + IntegerToString(lastFirstN), InpColorFirst, g_bull);
-   if(haveSecond)
+                firstLbl + IntegerToString(lastLegN), InpColorFirst, g_bull);
       DrawLabel(PFX + secondLbl, T[lastSecond.idx], ToReal(lastSecond.value),
-                secondLbl + IntegerToString(lastSecondN), InpColorSecond, !g_bull);
+                secondLbl + IntegerToString(lastLegN), InpColorSecond, !g_bull);
+     }
    if(haveBos)
      {
       DrawRefLine(PFX + "BOSline", T[bosFromIdx], T[bosIdx], ToReal(bosLevel), InpColorBOS);
