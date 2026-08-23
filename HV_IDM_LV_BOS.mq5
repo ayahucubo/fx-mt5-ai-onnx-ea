@@ -2,27 +2,28 @@
 //|                                             HV_IDM_LV_BOS.mq5    |
 //|  Market structure: Candidate -> IDM -> HV/LV -> BOS               |
 //|  Supports both bullish and bearish bias (InpBias).                 |
+//|  Only draws the LATEST state (live IDM, last HV, last LV, last     |
+//|  BOS) - no historical clutter. CHoCH is not implemented yet.       |
 //|                                                                    |
 //|  Definitions, written for the BULLISH case (InpBias=Bullish). The  |
 //|  BEARISH case is the exact mirror: swap every "high" for "low" and |
-//|  vice versa; CH (Calon High) becomes CL (Calon Low); the point      |
-//|  confirmed first is LV instead of HV, and the point confirmed        |
-//|  second is HV instead of LV.                                        |
+//|  vice versa; the point confirmed first is LV instead of HV, and     |
+//|  the point confirmed second is HV instead of LV.                    |
 //|                                                                    |
-//|   CH  (Calon High)   - a fractal swing-high candidate. It becomes  |
-//|                         the active candidate whenever its price     |
-//|                         is higher than the currently active one     |
-//|                         (a lower fractal high is drawn as BCH).      |
+//|   candidate (internal, not drawn) - a fractal swing-high candidate.|
+//|                         It becomes the active candidate whenever    |
+//|                         its price is higher than the currently      |
+//|                         active one.                                  |
 //|   IDM (Inducement)   - the lowest fractal swing-low since the       |
-//|                         active candidate's last update. It is       |
-//|                         LOCKED IN (becomes the operative IDM,        |
-//|                         replacing whatever was locked before) the   |
-//|                         moment the candidate updates to a new,       |
-//|                         higher high. Only the most recently locked  |
-//|                         IDM is ever checked for a swap - older ones |
-//|                         stop mattering the instant a newer one      |
-//|                         locks in (a lower fractal low that never    |
-//|                         gets locked is drawn as BIDM).               |
+//|                         active candidate's last update. Shown LIVE  |
+//|                         as soon as a pullback forms, before knowing |
+//|                         whether it will get swept. It is LOCKED IN  |
+//|                         (becomes the operative IDM, replacing        |
+//|                         whatever was locked before) the moment the  |
+//|                         candidate updates to a new, higher high.    |
+//|                         Only the most recently locked IDM is ever   |
+//|                         checked for a swap - older ones stop         |
+//|                         mattering the instant a newer one locks in. |
 //|   HV  (High Valid)   - confirmed the instant any candle's LOW wicks |
 //|                         below the currently locked IDM (wick only,  |
 //|                         no close required). HV's price is the       |
@@ -57,15 +58,11 @@ input ENUM_BIAS InpBias        = BIAS_BULLISH; // Bias
 input datetime  InpStartTime   = 0;            // Start time (0 = auto from InpMaxBars)
 input int       InpSwingLength = 2;            // Fractal swing length (bars each side)
 input int       InpMaxBars     = 3000;         // How many bars back to scan (used when InpStartTime=0)
-input bool      InpShowRejected= true;         // Show rejected candidates (BCH/BCL & BIDM)
-input color     InpColorCand   = clrSilver;    // Candidate (CH/CL) color
-input color     InpColorBCand  = clrGray;      // Rejected candidate (BCH/BCL) color
-input color     InpColorIDM    = clrOrange;    // IDM color
-input color     InpColorBIDM   = clrDarkGray;  // Rejected IDM (BIDM) color
+input color     InpColorIDM    = clrOrange;    // IDM (live) color
 input color     InpColorFirst  = clrDodgerBlue;// First-confirmed point color (HV in bull, LV in bear)
 input color     InpColorSecond = clrMagenta;   // Second-confirmed point color (LV in bull, HV in bear)
 input color     InpColorBOS    = clrLime;      // BOS / reference line color
-input int       InpFontSize    = 8;
+input int       InpFontSize    = 9;
 
 #define PFX "HVIDM_"
 
@@ -208,53 +205,45 @@ int OnCalculate(const int rates_total,
       pivotOpp[i]  = po;
      }
 
-   ObjectsDeleteAll(0, PFX);
+   string firstLbl = g_bull ? "HV" : "LV";
+   string secondLbl = g_bull ? "LV" : "HV";
 
-   string candLbl  = g_bull ? "CH"   : "CL";
-   string bcandLbl = g_bull ? "BCH"  : "BCL";
-   string firstLbl = g_bull ? "HV"   : "LV";
-   string secondLbl= g_bull ? "LV"   : "HV";
-
-   // find the very first confirmed pivot candidate to seed tracking
    int firstIdx = -1;
    for(int i = sl; i < len - sl; i++)
       if(pivotCand[i]) { firstIdx = i; break; }
    if(firstIdx < 0)
       return(rates_total);
 
-   int candN = 0, idmN = 0, firstN = 0, secondN = 0, bcandN = 0, bidmN = 0;
+   int firstN = 0, secondN = 0;
 
    SExtreme candidate;    MakeExtreme(candidate, firstIdx, Hi[firstIdx]);
-   candN++;
-   DrawLabel(PFX + candLbl + IntegerToString(candN), T[candidate.idx], ToReal(candidate.value),
-             candLbl + IntegerToString(candN), InpColorCand, g_bull);
-
    SExtreme shadow;       shadow.valid = false;
    SExtreme lockedOpp;    lockedOpp.valid = false;
    SExtreme secondPoint;  secondPoint.valid = false;
    SExtreme reference;    reference.valid = false;
-
    string phase = "seek_first";
+
+   // rolling "latest state" - only these get drawn, at the very end, so the
+   // chart never shows more than one of each even across thousands of bars.
+   bool     haveLiveIdm = false; SExtreme liveIdm;
+   bool     haveFirst = false;   SExtreme lastFirst;   int lastFirstN = 0;
+   bool     haveSecond = false;  SExtreme lastSecond;  int lastSecondN = 0;
+   bool     haveBos = false;     int bosFromIdx = -1, bosIdx = -1; double bosLevel = 0;
 
    for(int i = firstIdx + 1; i < len - sl; i++)
      {
       if(phase == "seek_first")
         {
          if(pivotOpp[i] && (!shadow.valid || Lo[i] < shadow.value))
-            MakeExtreme(shadow, i, Lo[i]);
-
-         if(InpShowRejected && pivotOpp[i] && shadow.idx != i)
            {
-            bidmN++;
-            DrawLabel(PFX + "BIDM" + IntegerToString(bidmN), T[i], ToReal(Lo[i]),
-                      "BIDM" + IntegerToString(bidmN), InpColorBIDM, !g_bull);
+            MakeExtreme(shadow, i, Lo[i]);
+            liveIdm = shadow; haveLiveIdm = true;
            }
 
          if(lockedOpp.valid && Lo[i] < lockedOpp.value)
            {
             firstN++;
-            DrawLabel(PFX + firstLbl + IntegerToString(firstN), T[candidate.idx], ToReal(candidate.value),
-                      firstLbl + IntegerToString(firstN), InpColorFirst, g_bull);
+            lastFirst = candidate; lastFirstN = firstN; haveFirst = true;
             phase = "seek_second";
             MakeExtreme(secondPoint, i, Lo[i]);
             MakeExtreme(reference, candidate.idx, candidate.value);
@@ -265,22 +254,11 @@ int OnCalculate(const int rates_total,
            {
             if(shadow.valid)
               {
-               idmN++;
-               DrawLabel(PFX + "IDM" + IntegerToString(idmN), T[shadow.idx], ToReal(shadow.value),
-                         "IDM" + IntegerToString(idmN), InpColorIDM, !g_bull);
                lockedOpp = shadow;
+               liveIdm = shadow; haveLiveIdm = true;
               }
             MakeExtreme(candidate, i, Hi[i]);
-            candN++;
-            DrawLabel(PFX + candLbl + IntegerToString(candN), T[i], ToReal(Hi[i]),
-                      candLbl + IntegerToString(candN), InpColorCand, g_bull);
             shadow.valid = false;
-           }
-         else if(InpShowRejected && pivotCand[i])
-           {
-            bcandN++;
-            DrawLabel(PFX + bcandLbl + IntegerToString(bcandN), T[i], ToReal(Hi[i]),
-                      bcandLbl + IntegerToString(bcandN), InpColorBCand, g_bull);
            }
         }
       else // seek_second
@@ -291,28 +269,39 @@ int OnCalculate(const int rates_total,
          if(Cl[i] > reference.value)
            {
             secondN++;
-            DrawLabel(PFX + secondLbl + IntegerToString(secondN), T[secondPoint.idx], ToReal(secondPoint.value),
-                      secondLbl + IntegerToString(secondN), InpColorSecond, !g_bull);
-            DrawRefLine(PFX + "BOSline" + IntegerToString(secondN), T[reference.idx], T[i],
-                        ToReal(reference.value), InpColorBOS);
-            DrawLabel(PFX + "BOS" + IntegerToString(secondN), T[i], ToReal(Cl[i]),
-                      "BOS", InpColorBOS, g_bull);
+            lastSecond = secondPoint; lastSecondN = secondN; haveSecond = true;
+            bosFromIdx = reference.idx; bosIdx = i; bosLevel = reference.value;
+            haveBos = true;
 
             phase = "seek_first";
             MakeExtreme(candidate, i, Hi[i]);
-            candN++;
-            DrawLabel(PFX + candLbl + IntegerToString(candN), T[i], ToReal(Hi[i]),
-                      candLbl + IntegerToString(candN), InpColorCand, g_bull);
             shadow.valid = false;
             lockedOpp.valid = false;
+            haveLiveIdm = false; // fresh leg - no live IDM yet until a pullback forms
            }
          else if(Hi[i] > reference.value)
-           {
-            DrawRefLine(PFX + "swap" + IntegerToString(secondN) + "_" + IntegerToString(i),
-                        T[reference.idx], T[i], ToReal(reference.value), InpColorBOS);
             MakeExtreme(reference, i, Hi[i]);
-           }
         }
+     }
+
+   ObjectsDeleteAll(0, PFX);
+
+   if(haveLiveIdm)
+      // no ordinal number here: this point is "live" and may still move to a
+      // deeper pullback before it ever gets locked in, so a fixed "IDM9" would
+      // misleadingly imply it's already the same thing as a specific locked IDM.
+      DrawLabel(PFX + "IDM", T[liveIdm.idx], ToReal(liveIdm.value),
+                "IDM", InpColorIDM, !g_bull);
+   if(haveFirst)
+      DrawLabel(PFX + firstLbl, T[lastFirst.idx], ToReal(lastFirst.value),
+                firstLbl + IntegerToString(lastFirstN), InpColorFirst, g_bull);
+   if(haveSecond)
+      DrawLabel(PFX + secondLbl, T[lastSecond.idx], ToReal(lastSecond.value),
+                secondLbl + IntegerToString(lastSecondN), InpColorSecond, !g_bull);
+   if(haveBos)
+     {
+      DrawRefLine(PFX + "BOSline", T[bosFromIdx], T[bosIdx], ToReal(bosLevel), InpColorBOS);
+      DrawLabel(PFX + "BOS", T[bosIdx], ToReal(bosLevel), "BOS", InpColorBOS, g_bull);
      }
 
    return(rates_total);
