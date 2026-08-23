@@ -1,8 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                             HV_IDM_LV_BOS.mq5    |
-//|  Bullish-bias market structure: Candidate High -> IDM -> HV/LV/BOS|
+//|  Market structure: Candidate -> IDM -> HV/LV -> BOS               |
+//|  Supports both bullish and bearish bias (InpBias).                 |
 //|                                                                    |
-//|  Definitions (bullish bias):                                      |
+//|  Definitions, written for the BULLISH case (InpBias=Bullish). The  |
+//|  BEARISH case is the exact mirror: swap every "high" for "low" and |
+//|  vice versa; CH (Calon High) becomes CL (Calon Low); the point      |
+//|  confirmed first is LV instead of HV, and the point confirmed        |
+//|  second is HV instead of LV.                                        |
+//|                                                                    |
 //|   CH  (Calon High)   - a fractal swing-high candidate. It becomes  |
 //|                         the active candidate whenever its price     |
 //|                         is higher than the currently active one     |
@@ -31,10 +37,9 @@
 //|                         reference confirms BOS; LV is the lowest    |
 //|                         low reached since HV up to that point.      |
 //|                                                                    |
-//|  This performs bullish-bias swing detection only (a mirrored        |
-//|  bearish version would swap highs/lows throughout). It has NOT      |
-//|  been compiled/tested in a live MetaEditor - compile and verify on  |
-//|  a chart before trusting it for anything that touches real trades.  |
+//|  It has NOT been compiled/tested in a live MetaEditor - compile     |
+//|  and verify on a chart before trusting it for anything that         |
+//|  touches real trades.                                                |
 //+------------------------------------------------------------------+
 #property copyright "generated for fx-mt5-ai-onnx-ea"
 #property indicator_chart_window
@@ -42,32 +47,43 @@
 #property indicator_plots   0
 #property strict
 
-input int   InpSwingLength   = 2;          // Fractal swing length (bars each side)
-input int   InpMaxBars       = 3000;       // How many bars back to scan
-input bool  InpShowRejected  = true;       // Show rejected candidates (BCH / BIDM)
-input color InpColorCH       = clrSilver;
-input color InpColorBCH      = clrGray;
-input color InpColorIDM      = clrOrange;
-input color InpColorBIDM     = clrDarkGray;
-input color InpColorHV       = clrDodgerBlue;
-input color InpColorLV       = clrMagenta;
-input color InpColorBOS      = clrLime;
-input int   InpFontSize      = 8;
+enum ENUM_BIAS
+  {
+   BIAS_BULLISH = 0,   // Bullish (HV confirmed first, then LV/BOS)
+   BIAS_BEARISH = 1    // Bearish (LV confirmed first, then HV/BOS)
+  };
+
+input ENUM_BIAS InpBias        = BIAS_BULLISH; // Bias
+input datetime  InpStartTime   = 0;            // Start time (0 = auto from InpMaxBars)
+input int       InpSwingLength = 2;            // Fractal swing length (bars each side)
+input int       InpMaxBars     = 3000;         // How many bars back to scan (used when InpStartTime=0)
+input bool      InpShowRejected= true;         // Show rejected candidates (BCH/BCL & BIDM)
+input color     InpColorCand   = clrSilver;    // Candidate (CH/CL) color
+input color     InpColorBCand  = clrGray;      // Rejected candidate (BCH/BCL) color
+input color     InpColorIDM    = clrOrange;    // IDM color
+input color     InpColorBIDM   = clrDarkGray;  // Rejected IDM (BIDM) color
+input color     InpColorFirst  = clrDodgerBlue;// First-confirmed point color (HV in bull, LV in bear)
+input color     InpColorSecond = clrMagenta;   // Second-confirmed point color (LV in bull, HV in bear)
+input color     InpColorBOS    = clrLime;      // BOS / reference line color
+input int       InpFontSize    = 8;
 
 #define PFX "HVIDM_"
 
-//--- one tracked extreme (a candidate high, a shadow/locked low, ...)
+//--- one tracked extreme (a candidate, a shadow/locked opposite point, ...)
 struct SExtreme
   {
    int      idx;     // bar index in the ascending (oldest->newest) arrays
-   double   price;
+   double   value;   // in TRANSFORMED space (see ToReal()); negate for bearish to get the real price
    bool     valid;
   };
+
+bool g_bull; // true = bullish bias, false = bearish
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   IndicatorSetString(INDICATOR_SHORTNAME, "HV/IDM/LV/BOS (bull)");
+   IndicatorSetString(INDICATOR_SHORTNAME,
+                       InpBias == BIAS_BULLISH ? "HV/IDM/LV/BOS (bull)" : "LV/IDM/HV/BOS (bear)");
    return(INIT_SUCCEEDED);
   }
 
@@ -78,21 +94,24 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-void MakeExtreme(SExtreme &e, int idx, double price)
+void MakeExtreme(SExtreme &e, int idx, double value)
   {
-   e.idx = idx; e.price = price; e.valid = true;
+   e.idx = idx; e.value = value; e.valid = true;
   }
 
 //+------------------------------------------------------------------+
-//| draw a small text label at (time[idx], price)                     |
+double ToReal(double v) { return g_bull ? v : -v; }
+
 //+------------------------------------------------------------------+
-void DrawLabel(string name, datetime t, double price, string text,
+//| draw a small text label at (time[idx], realPrice)                 |
+//+------------------------------------------------------------------+
+void DrawLabel(string name, datetime t, double realPrice, string text,
                color clr, bool above)
   {
    if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+      ObjectCreate(0, name, OBJ_TEXT, 0, t, realPrice);
    else
-      ObjectMove(0, name, 0, t, price);
+      ObjectMove(0, name, 0, t, realPrice);
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
@@ -103,14 +122,14 @@ void DrawLabel(string name, datetime t, double price, string text,
 //+------------------------------------------------------------------+
 //| draw a horizontal dotted reference line from bar t1 to bar t2      |
 //+------------------------------------------------------------------+
-void DrawRefLine(string name, datetime t1, datetime t2, double price, color clr)
+void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color clr)
   {
    if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price);
+      ObjectCreate(0, name, OBJ_TREND, 0, t1, realPrice, t2, realPrice);
    else
      {
-      ObjectMove(0, name, 0, t1, price);
-      ObjectMove(0, name, 1, t2, price);
+      ObjectMove(0, name, 0, t1, realPrice);
+      ObjectMove(0, name, 1, t2, realPrice);
      }
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
@@ -135,140 +154,163 @@ int OnCalculate(const int rates_total,
    if(n < 2 * InpSwingLength + 5)
       return(rates_total);
 
-   int start = MathMax(0, n - InpMaxBars);
-   int len   = n - start;
+   g_bull = (InpBias == BIAS_BULLISH);
 
    // work in ascending (oldest->newest) order regardless of the chart's
    // series direction, since OnCalculate already delivers arrays in
    // ascending (index 0 = oldest) order when the platform default is used.
-   double H[], L[], C[];
+   int start;
+   if(InpStartTime > 0)
+     {
+      start = 0;
+      for(int k = 0; k < n; k++)
+         if(time[k] >= InpStartTime) { start = k; break; }
+     }
+   else
+      start = MathMax(0, n - InpMaxBars);
+   int len = n - start;
+   if(len < 2 * InpSwingLength + 5)
+      return(rates_total);
+
+   // Hi[] / Lo[] are the transformed series: in bullish bias Hi=High, Lo=Low
+   // (used directly); in bearish bias Hi=-Low, Lo=-High, so that "track the
+   // running MAXIMUM of Hi" always means "find the candidate" (a real high
+   // for bull, a real low for bear) and "track the running MINIMUM of Lo"
+   // always means "find the opposite/IDM point" - the whole state machine
+   // below is then bias-agnostic. Cl[] mirrors Close[] the same way.
+   double Hi[], Lo[], Cl[];
    datetime T[];
-   ArrayResize(H, len); ArrayResize(L, len);
-   ArrayResize(C, len); ArrayResize(T, len);
+   ArrayResize(Hi, len); ArrayResize(Lo, len);
+   ArrayResize(Cl, len); ArrayResize(T, len);
    for(int k = 0; k < len; k++)
      {
-      H[k] = high[start + k];
-      L[k] = low[start + k];
-      C[k] = close[start + k];
-      T[k] = time[start + k];
+      Hi[k] = g_bull ?  high[start + k] : -low[start + k];
+      Lo[k] = g_bull ?  low[start + k]  : -high[start + k];
+      Cl[k] = g_bull ?  close[start + k]: -close[start + k];
+      T[k]  = time[start + k];
      }
 
    int sl = InpSwingLength;
-   bool pivotHigh[], pivotLow[];
-   ArrayResize(pivotHigh, len);
-   ArrayResize(pivotLow, len);
-   ArrayInitialize(pivotHigh, false);
-   ArrayInitialize(pivotLow, false);
+   bool pivotCand[], pivotOpp[];
+   ArrayResize(pivotCand, len);
+   ArrayResize(pivotOpp, len);
+   ArrayInitialize(pivotCand, false);
+   ArrayInitialize(pivotOpp, false);
    for(int i = sl; i < len - sl; i++)
      {
-      bool ph = true, pl = true;
+      bool pc = true, po = true;
       for(int k = 1; k <= sl; k++)
         {
-         if(!(H[i] > H[i - k] && H[i] > H[i + k])) ph = false;
-         if(!(L[i] < L[i - k] && L[i] < L[i + k])) pl = false;
+         if(!(Hi[i] > Hi[i - k] && Hi[i] > Hi[i + k])) pc = false;
+         if(!(Lo[i] < Lo[i - k] && Lo[i] < Lo[i + k])) po = false;
         }
-      pivotHigh[i] = ph;
-      pivotLow[i]  = pl;
+      pivotCand[i] = pc;
+      pivotOpp[i]  = po;
      }
 
    ObjectsDeleteAll(0, PFX);
 
-   // find the very first confirmed pivot high to seed the first candidate
+   string candLbl  = g_bull ? "CH"   : "CL";
+   string bcandLbl = g_bull ? "BCH"  : "BCL";
+   string firstLbl = g_bull ? "HV"   : "LV";
+   string secondLbl= g_bull ? "LV"   : "HV";
+
+   // find the very first confirmed pivot candidate to seed tracking
    int firstIdx = -1;
    for(int i = sl; i < len - sl; i++)
-      if(pivotHigh[i]) { firstIdx = i; break; }
+      if(pivotCand[i]) { firstIdx = i; break; }
    if(firstIdx < 0)
       return(rates_total);
 
-   int chN = 0, idmN = 0, hvN = 0, lvN = 0, bchN = 0, bidmN = 0;
+   int candN = 0, idmN = 0, firstN = 0, secondN = 0, bcandN = 0, bidmN = 0;
 
-   SExtreme candidate;    MakeExtreme(candidate, firstIdx, H[firstIdx]);
-   chN++;
-   DrawLabel(PFX + "CH" + IntegerToString(chN), T[candidate.idx], candidate.price,
-             "CH" + IntegerToString(chN), InpColorCH, true);
+   SExtreme candidate;    MakeExtreme(candidate, firstIdx, Hi[firstIdx]);
+   candN++;
+   DrawLabel(PFX + candLbl + IntegerToString(candN), T[candidate.idx], ToReal(candidate.value),
+             candLbl + IntegerToString(candN), InpColorCand, g_bull);
 
-   SExtreme shadowLow;    shadowLow.valid = false;
-   SExtreme lockedIdm;    lockedIdm.valid = false;
-   SExtreme candidateLow; candidateLow.valid = false;
+   SExtreme shadow;       shadow.valid = false;
+   SExtreme lockedOpp;    lockedOpp.valid = false;
+   SExtreme secondPoint;  secondPoint.valid = false;
    SExtreme reference;    reference.valid = false;
 
-   string phase = "seek_hv";
+   string phase = "seek_first";
 
    for(int i = firstIdx + 1; i < len - sl; i++)
      {
-      if(phase == "seek_hv")
+      if(phase == "seek_first")
         {
-         if(pivotLow[i] && (!shadowLow.valid || L[i] < shadowLow.price))
-            MakeExtreme(shadowLow, i, L[i]);
+         if(pivotOpp[i] && (!shadow.valid || Lo[i] < shadow.value))
+            MakeExtreme(shadow, i, Lo[i]);
 
-         if(InpShowRejected && pivotLow[i] && shadowLow.idx != i)
+         if(InpShowRejected && pivotOpp[i] && shadow.idx != i)
            {
             bidmN++;
-            DrawLabel(PFX + "BIDM" + IntegerToString(bidmN), T[i], L[i],
-                      "BIDM" + IntegerToString(bidmN), InpColorBIDM, false);
+            DrawLabel(PFX + "BIDM" + IntegerToString(bidmN), T[i], ToReal(Lo[i]),
+                      "BIDM" + IntegerToString(bidmN), InpColorBIDM, !g_bull);
            }
 
-         if(lockedIdm.valid && L[i] < lockedIdm.price)
+         if(lockedOpp.valid && Lo[i] < lockedOpp.value)
            {
-            hvN++;
-            DrawLabel(PFX + "HV" + IntegerToString(hvN), T[candidate.idx], candidate.price,
-                      "HV" + IntegerToString(hvN), InpColorHV, true);
-            phase = "seek_lv";
-            MakeExtreme(candidateLow, i, L[i]);
-            MakeExtreme(reference, candidate.idx, candidate.price);
+            firstN++;
+            DrawLabel(PFX + firstLbl + IntegerToString(firstN), T[candidate.idx], ToReal(candidate.value),
+                      firstLbl + IntegerToString(firstN), InpColorFirst, g_bull);
+            phase = "seek_second";
+            MakeExtreme(secondPoint, i, Lo[i]);
+            MakeExtreme(reference, candidate.idx, candidate.value);
             continue;
            }
 
-         if(pivotHigh[i] && H[i] > candidate.price)
+         if(pivotCand[i] && Hi[i] > candidate.value)
            {
-            if(shadowLow.valid)
+            if(shadow.valid)
               {
                idmN++;
-               DrawLabel(PFX + "IDM" + IntegerToString(idmN), T[shadowLow.idx], shadowLow.price,
-                         "IDM" + IntegerToString(idmN), InpColorIDM, false);
-               lockedIdm = shadowLow;
+               DrawLabel(PFX + "IDM" + IntegerToString(idmN), T[shadow.idx], ToReal(shadow.value),
+                         "IDM" + IntegerToString(idmN), InpColorIDM, !g_bull);
+               lockedOpp = shadow;
               }
-            MakeExtreme(candidate, i, H[i]);
-            chN++;
-            DrawLabel(PFX + "CH" + IntegerToString(chN), T[i], H[i],
-                      "CH" + IntegerToString(chN), InpColorCH, true);
-            shadowLow.valid = false;
+            MakeExtreme(candidate, i, Hi[i]);
+            candN++;
+            DrawLabel(PFX + candLbl + IntegerToString(candN), T[i], ToReal(Hi[i]),
+                      candLbl + IntegerToString(candN), InpColorCand, g_bull);
+            shadow.valid = false;
            }
-         else if(InpShowRejected && pivotHigh[i])
+         else if(InpShowRejected && pivotCand[i])
            {
-            bchN++;
-            DrawLabel(PFX + "BCH" + IntegerToString(bchN), T[i], H[i],
-                      "BCH" + IntegerToString(bchN), InpColorBCH, true);
+            bcandN++;
+            DrawLabel(PFX + bcandLbl + IntegerToString(bcandN), T[i], ToReal(Hi[i]),
+                      bcandLbl + IntegerToString(bcandN), InpColorBCand, g_bull);
            }
         }
-      else // seek_lv
+      else // seek_second
         {
-         if(L[i] < candidateLow.price)
-            MakeExtreme(candidateLow, i, L[i]);
+         if(Lo[i] < secondPoint.value)
+            MakeExtreme(secondPoint, i, Lo[i]);
 
-         if(C[i] > reference.price)
+         if(Cl[i] > reference.value)
            {
-            lvN++;
-            DrawLabel(PFX + "LV" + IntegerToString(lvN), T[candidateLow.idx], candidateLow.price,
-                      "LV" + IntegerToString(lvN), InpColorLV, false);
-            DrawRefLine(PFX + "BOSline" + IntegerToString(lvN), T[reference.idx], T[i],
-                        reference.price, InpColorBOS);
-            DrawLabel(PFX + "BOS" + IntegerToString(lvN), T[i], C[i],
-                      "BOS", InpColorBOS, true);
+            secondN++;
+            DrawLabel(PFX + secondLbl + IntegerToString(secondN), T[secondPoint.idx], ToReal(secondPoint.value),
+                      secondLbl + IntegerToString(secondN), InpColorSecond, !g_bull);
+            DrawRefLine(PFX + "BOSline" + IntegerToString(secondN), T[reference.idx], T[i],
+                        ToReal(reference.value), InpColorBOS);
+            DrawLabel(PFX + "BOS" + IntegerToString(secondN), T[i], ToReal(Cl[i]),
+                      "BOS", InpColorBOS, g_bull);
 
-            phase = "seek_hv";
-            MakeExtreme(candidate, i, H[i]);
-            chN++;
-            DrawLabel(PFX + "CH" + IntegerToString(chN), T[i], H[i],
-                      "CH" + IntegerToString(chN), InpColorCH, true);
-            shadowLow.valid = false;
-            lockedIdm.valid = false;
+            phase = "seek_first";
+            MakeExtreme(candidate, i, Hi[i]);
+            candN++;
+            DrawLabel(PFX + candLbl + IntegerToString(candN), T[i], ToReal(Hi[i]),
+                      candLbl + IntegerToString(candN), InpColorCand, g_bull);
+            shadow.valid = false;
+            lockedOpp.valid = false;
            }
-         else if(H[i] > reference.price)
+         else if(Hi[i] > reference.value)
            {
-            DrawRefLine(PFX + "swap" + IntegerToString(lvN) + "_" + IntegerToString(i),
-                        T[reference.idx], T[i], reference.price, InpColorBOS);
-            MakeExtreme(reference, i, H[i]);
+            DrawRefLine(PFX + "swap" + IntegerToString(secondN) + "_" + IntegerToString(i),
+                        T[reference.idx], T[i], ToReal(reference.value), InpColorBOS);
+            MakeExtreme(reference, i, Hi[i]);
            }
         }
      }
