@@ -19,9 +19,13 @@
 //|     kemudian bisa "keitung" sweep padahal bukan inducement       |
 //|     genuine (yang harusnya relatif cepat/dekat).                 |
 //|  3. "Low valid"   = low terendah antara bar sweep sampai bar     |
-//|     BOS (body close di atas high valid). Kalau tidak ada         |
-//|     pullback tambahan, ini sama dengan titik inducement itu      |
-//|     sendiri.                                                    |
+//|     BOS. Kalau tidak ada pullback tambahan, ini sama dengan      |
+//|     titik inducement itu sendiri. Level yang harus DI-BODY-BREAK |
+//|     buat BOS ini "ratchet": kalau ada candle yang wick-nya       |
+//|     (swap) nembus lebih tinggi dari high valid TANPA body close  |
+//|     di situ, acuannya pindah ke wick tertinggi itu -- body break |
+//|     berikutnya harus ngelewatin titik itu, bukan level high      |
+//|     valid yang asli (mirror: acuan turun buat jalur bearish).    |
 //|  4. HH/LH dan HL/LL ditentukan relatif terhadap high/low valid   |
 //|     tervalidasi SEBELUMNYA.                                     |
 //|  5. Hanya bar yang sudah close yang diproses (hindari repaint    |
@@ -452,12 +456,18 @@ int OnCalculate(const int rates_total,
          // Konsolidasi panjang dengan beberapa candle yang cuma wick nembus (bukan body
          // close) itu wajar; breakout body-close yang beneran boleh terjadi kapan saja
          // setelahnya, bukan cuma sebelum pivot high kecil berikutnya kebentuk.
+         //
+         // bosWatchLevel di-ratchet naik kalau ada candle yang wick-nya (swap) nembus
+         // lebih tinggi dari HV tanpa body close di situ -- acuan body-break buat LV
+         // pindah ke titik swap terdalam itu, bukan tetap di level HV yang asli.
          double runLow = idmPrice; int runLowIdx = idmIdx;
+         double bosWatchLevel = pivots[p].price;
          int bosBar = -1;
          for(int b = idmIdx; b <= lastBar; b++)
          {
             if(low[b] < runLow) { runLow = low[b]; runLowIdx = b; }
-            if(close[b] > pivots[p].price) { bosBar = b; break; }
+            if(high[b] > bosWatchLevel) bosWatchLevel = high[b];
+            if(close[b] > bosWatchLevel) { bosBar = b; break; }
          }
          if(bosBar != -1)
          {
@@ -470,10 +480,10 @@ int OnCalculate(const int rates_total,
             lastValidLowPrice = runLow;
 
             bufBOSDir[bosBar] = 1;
-            bufBOSLevel[bosBar] = pivots[p].price;
+            bufBOSLevel[bosBar] = bosWatchLevel;
             if(!InpOnlyLatestBOS)
-               DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, 1);
-            lastBOSDir = 1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
+               DrawBOS(time[pivots[p].idx], time[bosBar], bosWatchLevel, 1);
+            lastBOSDir = 1; lastBOSLevel = bosWatchLevel; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
             // L-valid ini sekarang jadi acuan aktif -- kalau nanti ada candle yang
             // body-close di BAWAHnya, itu CHoCH (bullish -> bearish).
@@ -602,12 +612,17 @@ int OnCalculate(const int rates_total,
          lastValidLowPrice = pivots[p].price;
 
          // Sama seperti jalur bullish: BOS tidak dibatasi windowEnd, cuma sweep-nya.
+         // bosWatchLevel di-ratchet turun kalau ada candle yang wick-nya (swap) nembus
+         // lebih rendah dari LV tanpa body close di situ -- acuan body-break buat HV
+         // pindah ke titik swap terendah itu, bukan tetap di level LV yang asli.
          double runHigh = idmPrice; int runHighIdx = idmIdx;
+         double bosWatchLevel = pivots[p].price;
          int bosBar = -1;
          for(int b = idmIdx; b <= lastBar; b++)
          {
             if(high[b] > runHigh) { runHigh = high[b]; runHighIdx = b; }
-            if(close[b] < pivots[p].price) { bosBar = b; break; }
+            if(low[b] < bosWatchLevel) bosWatchLevel = low[b];
+            if(close[b] < bosWatchLevel) { bosBar = b; break; }
          }
          if(bosBar != -1)
          {
@@ -620,10 +635,10 @@ int OnCalculate(const int rates_total,
             lastValidHighPrice = runHigh;
 
             bufBOSDir[bosBar] = -1;
-            bufBOSLevel[bosBar] = pivots[p].price;
+            bufBOSLevel[bosBar] = bosWatchLevel;
             if(!InpOnlyLatestBOS)
-               DrawBOS(time[pivots[p].idx], time[bosBar], pivots[p].price, -1);
-            lastBOSDir = -1; lastBOSLevel = pivots[p].price; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
+               DrawBOS(time[pivots[p].idx], time[bosBar], bosWatchLevel, -1);
+            lastBOSDir = -1; lastBOSLevel = bosWatchLevel; lastBOSTime = time[bosBar]; lastBOSFromTime = time[pivots[p].idx];
 
             // H-valid ini sekarang jadi acuan aktif -- kalau nanti ada candle yang
             // body-close di ATASnya, itu CHoCH (bearish -> bullish).
