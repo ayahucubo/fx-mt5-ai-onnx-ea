@@ -46,9 +46,19 @@
 //|     terakhir yang dievaluasi (begitu juga low lebih rendah untuk |
 //|     bias bearish) -- high/low yang lebih rendah/tinggi bukan     |
 //|     noise valid, di-skip total, bukan cuma dikasih label beda.   |
-//| 10. CHoCH = saat bias bullish, candle body-close di BAWAH L-valid|
-//|     yang lagi jadi acuan -> bias flip ke bearish (dan            |
-//|     sebaliknya untuk bias bearish, body-close di ATAS H-valid).  |
+//| 10. CHoCH = saat bias bullish, candle body-close di BAWAH acuan   |
+//|     -> bias flip ke bearish (sebaliknya untuk bias bearish,      |
+//|     body-close di ATAS). Acuan ini "ratchet": kalau ada wick     |
+//|     yang nembus lebih dalam/tinggi sebelum body-close (rejection |
+//|     wick), acuannya ikut pindah ke titik wick terdalam itu --    |
+//|     CHoCH cuma sah kalau beneran ngelewatin titik TERDALAM yang  |
+//|     pernah disentuh, bukan level awal yang mungkin udah "dites"  |
+//|     duluan sama wick yang lebih dalam.                           |
+//| 11. IDM "live" (rule #2 di atas) CUMA boleh gerak/update kalau    |
+//|     pivot yang bersangkutan genuinely lebih tinggi/rendah dari   |
+//|     H/L valid terakhir (gate #9 dicek DULU, sebelum IDM          |
+//|     disentuh sama sekali) -- IDM tidak boleh ikut gerak karena   |
+//|     noise yang gagal gate.                                      |
 //+------------------------------------------------------------------+
 #property copyright "fx-mt5-ai-onnx-ea"
 #property version   "1.00"
@@ -379,6 +389,13 @@ int OnCalculate(const int rates_total,
       {
          if(bias == -1) continue; // lagi bearish -- jalur bullish di-skip sampai ada CHoCH balik
 
+         // Gate DULUAN sebelum apapun disentuh: selama bias masih bullish, cuma high
+         // yang GENUINELY LEBIH TINGGI dari H valid terakhir yang relevan sama sekali --
+         // high yang lebih rendah itu bukan noise yang boleh menggerakkan IDM sekalipun,
+         // dia harus di-skip total dari awal (bukan cuma dilabel beda di akhir).
+         bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
+         if(!isHH) continue;
+
          // Bullish path: swing high, then internal pullback low (inducement candidate)
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
@@ -425,12 +442,6 @@ int OnCalculate(const int rates_total,
 
          if(!idmSwept) continue; // belum ke-sweep -> H belum valid, belum ada setup
 
-         // Selama bias masih bullish, cuma high yang GENUINELY LEBIH TINGGI dari H
-         // valid terakhir yang relevan buat dievaluasi -- high yang lebih rendah itu
-         // bukan "LH" yang valid, dia cuma noise selama belum ada CHoCH yang
-         // memindahkan konteksnya ke bearish. Di-skip total, bukan cuma diberi label beda.
-         bool isHH = !haveLastValidHigh || pivots[p].price > lastValidHighPrice;
-         if(!isHH) continue;
          bufHH[pivots[p].idx] = pivots[p].price;
          if(InpShowSwingLabels)
             DrawLabel(time[pivots[p].idx], pivots[p].price, "HH", InpColorHH, true);
@@ -468,16 +479,24 @@ int OnCalculate(const int rates_total,
             // body-close di BAWAHnya, itu CHoCH (bullish -> bearish).
             bias = 1;
             activeLevelPrice = runLow; activeLevelIdx = runLowIdx;
+            // Watch level ini "ratchet" turun kalau ada wick yang nembus lebih dalam
+            // (rejection wick, nggak close di situ) -- CHoCH baru sah kalau body-close
+            // beneran ngelewatin titik TERDALAM yang pernah disentuh, bukan cuma level
+            // acuan awal yang mungkin udah "dites" duluan sama wick yang lebih dalam.
+            double watchLevel = activeLevelPrice;
             int chochBar = -1;
             for(int cb = bosBar + 1; cb <= lastBar; cb++)
-               if(close[cb] < activeLevelPrice) { chochBar = cb; break; }
+            {
+               if(low[cb] < watchLevel) watchLevel = low[cb];
+               if(close[cb] < watchLevel) { chochBar = cb; break; }
+            }
             if(chochBar != -1)
             {
                bias = -1;
-               lastChochDir = -1; lastChochLevel = activeLevelPrice;
+               lastChochDir = -1; lastChochLevel = watchLevel;
                lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
                if(!InpOnlyLatestBOS)
-                  DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, -1);
+                  DrawChoch(time[activeLevelIdx], time[chochBar], watchLevel, -1);
                // Regime baru dimulai -- referensi low lama (dari struktur bullish
                // yang baru saja dipatahkan) sudah tidak relevan buat nge-gate low
                // pertama di regime bearish ini. Reset supaya low itu otomatis jadi
@@ -536,6 +555,11 @@ int OnCalculate(const int rates_total,
       {
          if(bias == 1) continue; // lagi bullish -- jalur bearish di-skip sampai ada CHoCH balik
 
+         // Gate duluan, mirror bullish: cuma low yang GENUINELY LEBIH RENDAH dari L
+         // valid terakhir yang boleh menggerakkan apapun (termasuk IDM).
+         bool isLL = !haveLastValidLow || pivots[p].price < lastValidLowPrice;
+         if(!isLL) continue;
+
          // Bearish path: swing low, then internal pullback high (inducement candidate)
          int idmIdx = pivots[p+1].idx;
          double idmPrice = pivots[p+1].price;
@@ -571,11 +595,6 @@ int OnCalculate(const int rates_total,
 
          if(!idmSwept) continue;
 
-         // Mirror bullish: selama bias masih bearish, cuma low yang GENUINELY LEBIH
-         // RENDAH dari L valid terakhir yang dievaluasi. Low yang lebih tinggi bukan
-         // "HL" yang valid di sini -- itu cuma noise sampai ada CHoCH balik ke bullish.
-         bool isLL = !haveLastValidLow || pivots[p].price < lastValidLowPrice;
-         if(!isLL) continue;
          bufLL[pivots[p].idx] = pivots[p].price;
          if(InpShowSwingLabels)
             DrawLabel(time[pivots[p].idx], pivots[p].price, "LL", InpColorLL, false);
@@ -610,16 +629,22 @@ int OnCalculate(const int rates_total,
             // body-close di ATASnya, itu CHoCH (bearish -> bullish).
             bias = -1;
             activeLevelPrice = runHigh; activeLevelIdx = runHighIdx;
+            // Ratchet ke atas: kalau ada wick yang nembus lebih tinggi (rejection wick),
+            // level yang harus di-body-break buat CHoCH naik ikut ke titik itu.
+            double watchLevel = activeLevelPrice;
             int chochBar = -1;
             for(int cb = bosBar + 1; cb <= lastBar; cb++)
-               if(close[cb] > activeLevelPrice) { chochBar = cb; break; }
+            {
+               if(high[cb] > watchLevel) watchLevel = high[cb];
+               if(close[cb] > watchLevel) { chochBar = cb; break; }
+            }
             if(chochBar != -1)
             {
                bias = 1;
-               lastChochDir = 1; lastChochLevel = activeLevelPrice;
+               lastChochDir = 1; lastChochLevel = watchLevel;
                lastChochTime = time[chochBar]; lastChochFromTime = time[activeLevelIdx];
                if(!InpOnlyLatestBOS)
-                  DrawChoch(time[activeLevelIdx], time[chochBar], activeLevelPrice, 1);
+                  DrawChoch(time[activeLevelIdx], time[chochBar], watchLevel, 1);
                // Sama seperti bullish->bearish: reset referensi high lama dari
                // struktur bearish yang baru dipatahkan.
                haveLastValidHigh = false;
