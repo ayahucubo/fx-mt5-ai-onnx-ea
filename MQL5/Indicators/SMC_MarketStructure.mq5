@@ -80,6 +80,7 @@
 
 input int   InpSwingBars        = 4;     // Jumlah bar kiri/kanan untuk deteksi fractal swing (2 kegampangan detect noise di M5, sudah divalidasi 4 lebih bersih)
 input int   InpMaxSweepBars     = 50;    // Batas maks bar menunggu sweep inducement (0 = tanpa batas)
+input int   InpMaxHistoryBars   = 10000; // Batas berapa bar terakhir yang diproses (0 = semua history -- BERAT kalau history panjang)
 input bool  InpUseOnlyClosedBars = true;  // Hanya proses bar yang sudah close (hindari repaint)
 input bool  InpShowOB            = true;  // Tampilkan Order Block (POI)
 input bool  InpShowFVG           = true;  // Tampilkan Fair Value Gap
@@ -286,7 +287,13 @@ int OnCalculate(const int rates_total,
    if(lastBar < 2 * n + 2)
       return rates_total;
 
-   for(int i = 0; i < rates_total; i++)
+   // Batasi jendela kerja ke InpMaxHistoryBars terakhir -- tanpa ini, full-recompute
+   // tiap panggilan OnCalculate jadi O(n^2)-ish dan sangat berat begitu history yang
+   // ke-load numpuk puluhan ribu bar (persis yang bikin Strategy Tester ketinggalan
+   // jauh dari kecepatan replay-nya).
+   int scanStart = (InpMaxHistoryBars > 0) ? MathMax(n, rates_total - InpMaxHistoryBars) : n;
+
+   for(int i = MathMax(0, scanStart - n); i < rates_total; i++)
    {
       bufHH[i] = EMPTY_VALUE;
       bufLH[i] = EMPTY_VALUE;
@@ -307,7 +314,7 @@ int OnCalculate(const int rates_total,
    int pivotCount = 0;
    int lastType = 0; // 0 none, 1 high, -1 low
 
-   for(int i = n; i <= lastBar - n; i++)
+   for(int i = scanStart; i <= lastBar - n; i++)
    {
       if(IsFractalHigh(high, i, n, lastBar))
       {
