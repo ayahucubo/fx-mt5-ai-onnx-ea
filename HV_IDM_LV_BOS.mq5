@@ -311,11 +311,17 @@ int OnCalculate(const int rates_total,
    ObjectsDeleteAll(0, PFX);
 
    if(haveLiveIdm)
+     {
       // no ordinal number here: this point is "live" and may still move to a
       // deeper pullback before it ever gets locked in, so a fixed "IDM9" would
       // misleadingly imply it's already the same thing as a specific locked IDM.
       DrawLabel(PFX + "IDM", T[liveIdm.idx], ToReal(liveIdm.value),
                 "IDM", InpColorIDM, !g_bull);
+      // extend a line from the IDM out to the current bar, same as the SMC-style
+      // "inducement" line - makes the level easy to read against live price
+      // instead of just a floating text label.
+      DrawRefLine(PFX + "IDMline", T[liveIdm.idx], T[len - 1], ToReal(liveIdm.value), InpColorIDM);
+     }
    if(haveLeg)
      {
       DrawLabel(PFX + firstLbl, T[lastFirst.idx], ToReal(lastFirst.value),
