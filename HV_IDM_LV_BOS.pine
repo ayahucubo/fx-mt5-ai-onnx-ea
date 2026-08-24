@@ -536,7 +536,6 @@ if barstate.islast
         label.delete(pendLabel)
         pendLine := na
         pendLabel := na
-<<<<<<< HEAD
 
     // -------------------------------------------------------------
     // Temporary debug table - shows internal state so we can see
