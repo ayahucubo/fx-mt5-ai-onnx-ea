@@ -34,6 +34,15 @@
 indicator("HV/IDM/LV/BOS (SMC)", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
 
 // ---------------------------------------------------------------------
+// SANITY CHECK - unconditional, runs on every bar no matter what, zero
+// dependency on any state below. If this yellow line does NOT appear on
+// the chart, the running script is not this code (stale/cached indicator
+// instance) - remove the indicator from the chart entirely and re-add it
+// from the Pine Editor rather than debugging the logic further.
+// ---------------------------------------------------------------------
+plot(close, title = "DEBUG: script is running (should track price)", color = color.yellow, linewidth = 2)
+
+// ---------------------------------------------------------------------
 // Inputs
 // ---------------------------------------------------------------------
 biasInput      = input.string("Bullish", "Initial Bias", options = ["Bullish", "Bearish"], group = "Bias")
