@@ -47,6 +47,7 @@ colorBOS       = input.color(color.lime, "BOS line color", group = "Colors")
 colorCHoC      = input.color(color.white, "CHoC line/label color", group = "Colors")
 colorPending   = input.color(color.aqua, "Pending point color", group = "Colors")
 labelSize      = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = "Colors")
+showDebug      = input.bool(true, "Show debug state table (temporary diagnostic)", group = "Debug")
 
 // ---------------------------------------------------------------------
 // A completed leg record (HV+LV confirmed together at BOS, or via CHoC)
@@ -535,3 +536,29 @@ if barstate.islast
         label.delete(pendLabel)
         pendLine := na
         pendLabel := na
+
+    // -------------------------------------------------------------
+    // Temporary debug table - shows internal state so we can see
+    // whether the state machine is progressing at all, and where
+    // it's stuck, without guessing. Safe to remove once diagnosed.
+    // -------------------------------------------------------------
+    if showDebug
+        var table dbg = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 20), border_width = 1)
+        table.cell(dbg, 0, 0, "bar_index", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 0, str.tostring(bar_index), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 1, "minBarsNeeded", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 1, str.tostring(minBarsNeeded), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 2, "phase", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 2, phase, text_color = color.yellow, text_size = size.small)
+        table.cell(dbg, 0, 3, "curBull", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 3, str.tostring(curBull), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 4, "legs count", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 4, str.tostring(array.size(legs)), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 5, "haveLiveIdm", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 5, str.tostring(haveLiveIdm), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 6, "haveSweptIdm", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 6, str.tostring(haveSweptIdm), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 7, "haveBos", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 7, str.tostring(haveBos), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 8, "candidateReal", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 8, na(candidateReal) ? "na" : str.tostring(candidateReal), text_color = color.white, text_size = size.small)
