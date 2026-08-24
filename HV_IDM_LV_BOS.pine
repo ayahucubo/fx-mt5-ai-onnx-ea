@@ -100,6 +100,25 @@ var int    secondIdx   = na
 var float  secondValue = na
 var float  secondReal  = na
 
+// Incremental tracker for the "impulse window" since the latest secondIdx
+// (the running highest high, and the running fractal-confirmed lowest
+// pivot) - updated bar-by-bar as we go, so BOS-confirm time never needs
+// to scan back over an unbounded stretch of history. A prior version did
+// scan back with a variable-offset `[]` reference (`high[bar_index - k]`),
+// which works fine over a short verification CSV but throws a runtime
+// "requested historical offset too far back" error on a real multi-year
+// chart the moment a leg's impulse happens to be long - which silently
+// kills ALL of the script's output, with no plots at all, anywhere.
+var bool   windowCandValid   = false
+var int    windowCandIdx     = na
+var float  windowCandValue   = na
+var float  windowCandReal    = na
+
+var bool   windowShadowValid = false
+var int    windowShadowIdx   = na
+var float  windowShadowValue = na
+var float  windowShadowReal  = na
+
 var bool   pendingValid = false
 var int    pendingIdx   = na
 var float  pendingValue = na
@@ -216,6 +235,8 @@ if bar_index >= minBarsNeeded
                             secondValue := low
                             secondReal := low
                             secondValid := true
+                            windowCandValid := false
+                            windowShadowValid := false
             else
                 if high > chocRefPrice
                     if close > chocRefPrice
@@ -236,6 +257,8 @@ if bar_index >= minBarsNeeded
                             secondValue := -high
                             secondReal := high
                             secondValid := true
+                            windowCandValid := false
+                            windowShadowValid := false
 
             if chocTriggeredThisBar
                 newBull = not curBull
@@ -334,6 +357,9 @@ if bar_index >= minBarsNeeded
                     sweptIdmBreakIdx := bar_index
                     haveSweptIdm := true
                     haveLiveIdm := false
+
+                    windowCandValid := false
+                    windowShadowValid := false
                 else if currHi > candidateValue
                     if shadowValid
                         lockedValid := true
@@ -349,11 +375,38 @@ if bar_index >= minBarsNeeded
                     shadowValid := false
 
             else // seek_second
+                secondMoved = false
                 if not secondValid or currLo < secondValue
                     secondValid := true
                     secondIdx := bar_index
                     secondValue := currLo
                     secondReal := realLo
+                    secondMoved := true
+
+                // Incrementally track the impulse-window candidate/shadow
+                // (bars strictly after the latest secondIdx) as we go, bar
+                // by bar - no backward rescan needed at BOS-confirm time.
+                // Reset whenever secondIdx itself moves forward, since the
+                // window's start point just changed.
+                if secondMoved
+                    windowCandValid := false
+                    windowShadowValid := false
+                else if bar_index > secondIdx
+                    if not windowCandValid or currHi > windowCandValue
+                        windowCandValid := true
+                        windowCandIdx := bar_index
+                        windowCandValue := currHi
+                        windowCandReal := realHi
+
+                    windowBackLimit = bar_index - secondIdx
+                    if isPivotClipped(curBull, windowBackLimit)
+                        wpv = curBull ? low[swingLength] : -high[swingLength]
+                        wpr = curBull ? low[swingLength] : high[swingLength]
+                        if not windowShadowValid or wpv < windowShadowValue
+                            windowShadowValid := true
+                            windowShadowIdx := pivotBarIdx
+                            windowShadowValue := wpv
+                            windowShadowReal := wpr
 
                 bosTriggered = false
                 if curBull
@@ -388,62 +441,37 @@ if bar_index >= minBarsNeeded
                     haveBos := true
                     phase := "seek_first"
 
-                    // candidate = the true extreme across the impulse wave
-                    candIdx = bar_index
-                    candVal = currHi
-                    candReal = realHi
-                    for k = secondIdx + 1 to bar_index
-                        kv = curBull ? high[bar_index - k] : -low[bar_index - k]
-                        kr = curBull ? high[bar_index - k] : low[bar_index - k]
-                        if kv > candVal
-                            candVal := kv
-                            candReal := kr
-                            candIdx := k
-                    candidateIdx := candIdx
-                    candidateValue := candVal
-                    candidateReal := candReal
+                    // candidate = the true extreme across the impulse wave,
+                    // read directly from the incrementally-tracked window
+                    // (falls back to this bar's own high in the rare case
+                    // secondIdx moved on this exact bar, so the window
+                    // never got a chance to update)
+                    if not windowCandValid or currHi > windowCandValue
+                        candidateIdx := bar_index
+                        candidateValue := currHi
+                        candidateReal := realHi
+                    else
+                        candidateIdx := windowCandIdx
+                        candidateValue := windowCandValue
+                        candidateReal := windowCandReal
                     shadowValid := false
                     lockedValid := false
                     pendingValid := false
                     haveLiveIdm := false
 
-                    // scan the impulse wave for pullbacks to seed the next IDM
-                    for k = secondIdx + 1 to bar_index - 1
-                        // NOTE: isPivotClipped always reads `swingLength` bars
-                        // back from the CURRENT bar, so re-checking a bar `k`
-                        // that isn't `swingLength` bars ago requires the same
-                        // check evaluated as-of when bar k was current - since
-                        // we can't replay that here, approximate using the
-                        // plain (non-offset-shifted) high/low arrays instead.
-                        backStart = math.max(secondIdx, k - swingLength)
-                        forwardEnd = k + swingLength
-                        if forwardEnd <= bar_index
-                            kVal = curBull ? low[bar_index - k] : -high[bar_index - k]
-                            kReal = curBull ? low[bar_index - k] : high[bar_index - k]
-                            okPivot = true
-                            for b = backStart to k - 1
-                                cmp = curBull ? low[bar_index - b] : -high[bar_index - b]
-                                if cmp <= kVal
-                                    okPivot := false
-                            for f = k + 1 to forwardEnd
-                                cmp = curBull ? low[bar_index - f] : -high[bar_index - f]
-                                if cmp <= kVal
-                                    okPivot := false
-                            if okPivot and (not shadowValid or kVal < shadowValue)
-                                shadowValid := true
-                                shadowIdx := k
-                                shadowValue := kVal
-                                shadowReal := kReal
-
-                    if shadowValid
+                    // the next IDM, if any pullback formed during the
+                    // impulse, is whatever the window already tracked
+                    if windowShadowValid
                         lockedValid := true
-                        lockedIdx := shadowIdx
-                        lockedValue := shadowValue
-                        lockedReal := shadowReal
-                        liveIdmIdx := shadowIdx
-                        liveIdmReal := shadowReal
+                        lockedIdx := windowShadowIdx
+                        lockedValue := windowShadowValue
+                        lockedReal := windowShadowReal
+                        liveIdmIdx := windowShadowIdx
+                        liveIdmReal := windowShadowReal
                         haveLiveIdm := true
-                        shadowValid := false
+
+                    windowCandValid := false
+                    windowShadowValid := false
 
 // ---------------------------------------------------------------------
 // Incremental mitigation tracking - runs every bar (cheap: one pass over
