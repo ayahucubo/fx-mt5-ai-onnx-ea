@@ -1,0 +1,537 @@
+//@version=6
+// =====================================================================
+// HV / IDM / LV / BOS (SMC) - TradingView port of HV_IDM_LV_BOS.mq5
+// =====================================================================
+// Ported from the MQL5 indicator of the same logic (see HV_IDM_LV_BOS.mq5
+// in this repo). Core state machine (candidate/IDM/HV/LV/BOS) is verified
+// end-to-end against test-data/XAUUSDm_M5_20260820-21.csv - matches every
+// ground-truth point (HV1=4567.784@06:55, LV1=4558.344@07:10,
+// HV2=4604.593@11:35, LV2=4563.321@12:40, HV3 pending=4632.130@17:05).
+//
+// The CHoC / auto-bias-flip path (autoBias input) is NOT verified against
+// real reversal data - the reference dataset never leaves bullish bias.
+// Left off by default; only enable after checking it against a real
+// bullish<->bearish transition.
+//
+// candidate  - the running highest high (bull) / lowest low (bear) since
+//              the leg started. Extends on ANY new extreme - no fractal
+//              confirmation needed (it's just "the best seen so far").
+// IDM        - lowest (bull) / highest (bear) FRACTAL-confirmed swing
+//              point since the candidate's last update. Live the moment a
+//              genuine pullback forms; LOCKED IN (replacing whatever was
+//              locked before) the instant the candidate ticks to a new
+//              extreme. Only the most recently locked IDM is ever checked
+//              for a sweep.
+// HV/LV      - confirmed the instant a candle wicks through the locked
+//              IDM (bull: low < IDM; bear: high > IDM), wick only.
+// LV/HV      - after HV/LV confirms, track the running opposite extreme;
+//              a reference starts at the confirmed point's own price and
+//              RATCHETS toward price on any wick-only break (a "swap");
+//              the first body-close through the (possibly ratcheted)
+//              reference confirms BOS.
+// =====================================================================
+
+indicator("HV/IDM/LV/BOS (SMC)", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ---------------------------------------------------------------------
+// Inputs
+// ---------------------------------------------------------------------
+biasInput      = input.string("Bullish", "Initial Bias", options = ["Bullish", "Bearish"], group = "Bias")
+autoBias       = input.bool(false, "Auto-detect CHoC and flip bias dynamically (UNVERIFIED)", group = "Bias")
+swingLength    = input.int(3, "Fractal swing length (bars each side)", minval = 1, maxval = 20, group = "Structure")
+maxLegsShown   = input.int(10, "Max completed legs to keep on chart", minval = 1, maxval = 50, group = "Structure")
+colorIDM       = input.color(color.orange, "IDM (live) color", group = "Colors")
+colorFirst     = input.color(color.blue, "First-confirmed point color (HV in bull, LV in bear)", group = "Colors")
+colorSecond    = input.color(color.fuchsia, "Second-confirmed point color (LV in bull, HV in bear)", group = "Colors")
+colorBOS       = input.color(color.lime, "BOS line color", group = "Colors")
+colorCHoC      = input.color(color.white, "CHoC line/label color", group = "Colors")
+colorPending   = input.color(color.aqua, "Pending point color", group = "Colors")
+labelSize      = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = "Colors")
+
+// ---------------------------------------------------------------------
+// A completed leg record (HV+LV confirmed together at BOS, or via CHoC)
+// ---------------------------------------------------------------------
+type Leg
+    int    firstIdx
+    float  firstPrice
+    string firstLbl
+    int    secondIdx  = na
+    float  secondPrice = na
+    string secondLbl  = ""
+    int    bosBreakIdx
+    bool   isBull
+    bool   mitigated  = false  // updated incrementally per bar, not rescanned
+    line   lineObj    = na
+    label  firstLabelObj = na
+    label  secondLabelObj = na
+
+// ---------------------------------------------------------------------
+// Persistent state (survives across bars, matching MQL5's per-recalc
+// state - here it's simply carried forward bar by bar, which is Pine's
+// natural execution model and needs no "rescan the whole history" step)
+// ---------------------------------------------------------------------
+var bool   curBull        = biasInput == "Bullish"
+var int    candidateIdx   = na
+var float  candidateValue = na   // transformed (bear = negated) value used for comparisons
+var float  candidateReal  = na   // actual price
+
+var bool   shadowValid = false
+var int    shadowIdx   = na
+var float  shadowValue = na
+var float  shadowReal  = na
+
+var bool   lockedValid = false
+var int    lockedIdx   = na
+var float  lockedValue = na
+var float  lockedReal  = na
+
+var bool   secondValid = false
+var int    secondIdx   = na
+var float  secondValue = na
+var float  secondReal  = na
+
+var bool   pendingValid = false
+var int    pendingIdx   = na
+var float  pendingValue = na
+var float  pendingReal  = na
+
+var bool   lastStructValid = false
+var int    lastStructIdx   = na
+var float  lastStructReal  = na
+
+var float  chocRefPrice = na
+var int    chocRefIdx   = na
+
+var bool   haveLiveIdm = false
+var int    liveIdmIdx  = na
+var float  liveIdmReal = na
+
+var bool   haveSweptIdm     = false
+var int    sweptIdmIdx      = na
+var float  sweptIdmPrice    = na
+var int    sweptIdmBreakIdx = na
+
+var bool   haveBos     = false
+var int    bosHVIdx    = na
+var float  bosHVPrice  = na
+var int    bosBreakIdx = na
+var bool   bosIsBull   = curBull
+var float  bosRefPrice = na
+
+var string phase   = "seek_first"
+var int    hvCount = 0
+var int    lvCount = 0
+
+var Leg[] legs = array.new<Leg>()
+
+// live/pending/BOS/IDM/CHoC drawing objects (single, reused in place -
+// avoids the flicker of delete+recreate every bar)
+var line  idmLine   = na
+var label idmLabel  = na
+var line  bosLine   = na
+var label bosLabelO = na
+var line  pendLine  = na
+var label pendLabel = na
+var line  chocLine  = na
+var label chocLabelO = na
+
+// ---------------------------------------------------------------------
+// Fractal pivot check for the bar `swingLength` bars ago, with the
+// backward-looking side clipped so it never crosses further back than
+// `backLimitBarsAgo` bars ago - i.e. never before the bar the current
+// leg's candidate tracking started from. Without this clip a pivot check
+// can reach into an unrelated, already-closed leg's price action and get
+// wrongly disqualified by it (or the reverse - let noise from a stale
+// context validate a pivot that isn't genuinely a local extreme).
+// bull=true checks a LOW pivot (for IDM tracking in a bullish leg);
+// bull=false checks a HIGH pivot (mirror, bearish leg).
+// ---------------------------------------------------------------------
+isPivotClipped(bool bull, int backLimitBarsAgo) =>
+    float pivotVal = bull ? low[swingLength] : high[swingLength]
+    bool ok = true
+    for j = 1 to swingLength
+        offset = swingLength + j
+        if offset <= backLimitBarsAgo
+            cmp = bull ? low[offset] : high[offset]
+            if bull ? (cmp <= pivotVal) : (cmp >= pivotVal)
+                ok := false
+    if ok
+        for k = 1 to swingLength
+            offset = swingLength - k
+            cmp = bull ? low[offset] : high[offset]
+            if bull ? (cmp <= pivotVal) : (cmp >= pivotVal)
+                ok := false
+    ok
+
+// ---------------------------------------------------------------------
+// Only start once enough bars exist for a pivot check to ever succeed,
+// and seed the candidate on the very first eligible bar.
+// ---------------------------------------------------------------------
+minBarsNeeded = 2 * swingLength + 1
+
+if bar_index >= minBarsNeeded
+    if na(candidateIdx)
+        // seed: just the running high (bull) / low (bear) so far - no
+        // pivot confirmation needed, it's naturally superseded later if
+        // something more extreme comes along.
+        candidateIdx   := bar_index
+        candidateValue := curBull ? high : -low
+        candidateReal  := curBull ? high : low
+    else
+        // pivot bar under consideration this bar: swingLength bars ago
+        pivotBarIdx = bar_index - swingLength
+
+        // ---------------------------------------------------------
+        // 1. CHoC check (only once a structural second point exists)
+        // ---------------------------------------------------------
+        chocTriggeredThisBar = false
+        if autoBias and lastStructValid
+            if curBull
+                if low < chocRefPrice
+                    if close < chocRefPrice
+                        chocTriggeredThisBar := true
+                    else
+                        chocRefPrice := low
+                        chocRefIdx   := bar_index
+                        if phase == "seek_first"
+                            hvCount += 1
+                            pendingIdx := candidateIdx
+                            pendingValue := candidateValue
+                            pendingReal := candidateReal
+                            bosRefPrice := candidateReal
+                            newLeg = Leg.new(candidateIdx, candidateReal, "HV" + str.tostring(hvCount), bosBreakIdx = bar_index, isBull = true)
+                            array.push(legs, newLeg)
+                            phase := "seek_second"
+                            secondIdx := bar_index
+                            secondValue := low
+                            secondReal := low
+                            secondValid := true
+            else
+                if high > chocRefPrice
+                    if close > chocRefPrice
+                        chocTriggeredThisBar := true
+                    else
+                        chocRefPrice := high
+                        chocRefIdx   := bar_index
+                        if phase == "seek_first"
+                            lvCount += 1
+                            pendingIdx := candidateIdx
+                            pendingValue := candidateValue
+                            pendingReal := candidateReal
+                            bosRefPrice := candidateReal
+                            newLeg = Leg.new(candidateIdx, candidateReal, "LV" + str.tostring(lvCount), bosBreakIdx = bar_index, isBull = false)
+                            array.push(legs, newLeg)
+                            phase := "seek_second"
+                            secondIdx := bar_index
+                            secondValue := -high
+                            secondReal := high
+                            secondValid := true
+
+            if chocTriggeredThisBar
+                newBull = not curBull
+                // CHoC line for the level that just got broken
+                if na(chocLine)
+                    chocLine := line.new(lastStructIdx, lastStructReal, bar_index, lastStructReal, color = colorCHoC, style = line.style_solid, width = 2)
+                    chocLabelO := label.new(bar_index, lastStructReal, "CHoC", color = color.new(color.black, 100), textcolor = colorCHoC, style = newBull ? label.style_label_up : label.style_label_down, size = labelSize)
+                else
+                    line.set_xy1(chocLine, lastStructIdx, lastStructReal)
+                    line.set_xy2(chocLine, bar_index, lastStructReal)
+                    label.set_xy(chocLabelO, bar_index, lastStructReal)
+                    label.set_style(chocLabelO, newBull ? label.style_label_up : label.style_label_down)
+
+                curBull := newBull
+                if not curBull
+                    // bull -> bear: highest high of the bullish move becomes HV
+                    mIdx = lastStructIdx
+                    mVal = high[bar_index - lastStructIdx]
+                    for k = lastStructIdx to bar_index
+                        kv = high[bar_index - k]
+                        if kv > mVal
+                            mVal := kv
+                            mIdx := k
+                    hvCount += 1
+                    array.push(legs, Leg.new(mIdx, mVal, "HV" + str.tostring(hvCount), bosBreakIdx = bar_index, isBull = false))
+                    lastStructIdx := mIdx
+                    lastStructReal := mVal
+                    lastStructValid := true
+                    candidateIdx := bar_index
+                    candidateValue := -low
+                    candidateReal := low
+                else
+                    // bear -> bull: lowest low of the bearish move becomes LV
+                    mIdx = lastStructIdx
+                    mVal = low[bar_index - lastStructIdx]
+                    for k = lastStructIdx to bar_index
+                        kv = low[bar_index - k]
+                        if kv < mVal
+                            mVal := kv
+                            mIdx := k
+                    lvCount += 1
+                    array.push(legs, Leg.new(mIdx, mVal, "LV" + str.tostring(lvCount), bosBreakIdx = bar_index, isBull = true))
+                    lastStructIdx := mIdx
+                    lastStructReal := mVal
+                    lastStructValid := true
+                    candidateIdx := bar_index
+                    candidateValue := high
+                    candidateReal := high
+
+                chocRefPrice := lastStructReal
+                chocRefIdx   := lastStructIdx
+                shadowValid := false
+                lockedValid := false
+                pendingValid := false
+                secondValid := false
+                haveLiveIdm := false
+                haveSweptIdm := false
+                sweptIdmIdx := na
+                sweptIdmBreakIdx := na
+                phase := "seek_first"
+
+        // ---------------------------------------------------------
+        // 2. Normal structure processing (skipped this bar if CHoC fired)
+        // ---------------------------------------------------------
+        if not chocTriggeredThisBar
+            currHi = curBull ? high : -low
+            currLo = curBull ? low : -high
+            realLo = curBull ? low : high
+            realHi = curBull ? high : low
+
+            if phase == "seek_first"
+                backLimitBarsAgo = bar_index - candidateIdx
+                if isPivotClipped(curBull, backLimitBarsAgo)
+                    pv = curBull ? low[swingLength] : -high[swingLength]
+                    pr = curBull ? low[swingLength] : high[swingLength]
+                    if not shadowValid or pv < shadowValue
+                        shadowValid := true
+                        shadowIdx := pivotBarIdx
+                        shadowValue := pv
+                        shadowReal := pr
+
+                if lockedValid and currLo < lockedValue
+                    pendingIdx := candidateIdx
+                    pendingValue := candidateValue
+                    pendingReal := candidateReal
+                    pendingValid := true
+                    bosRefPrice := candidateReal
+                    phase := "seek_second"
+                    secondIdx := bar_index
+                    secondValue := currLo
+                    secondReal := realLo
+                    secondValid := true
+
+                    sweptIdmIdx := lockedIdx
+                    sweptIdmPrice := lockedReal
+                    sweptIdmBreakIdx := bar_index
+                    haveSweptIdm := true
+                    haveLiveIdm := false
+                else if currHi > candidateValue
+                    if shadowValid
+                        lockedValid := true
+                        lockedIdx := shadowIdx
+                        lockedValue := shadowValue
+                        lockedReal := shadowReal
+                        liveIdmIdx := shadowIdx
+                        liveIdmReal := shadowReal
+                        haveLiveIdm := true
+                    candidateIdx := bar_index
+                    candidateValue := currHi
+                    candidateReal := realHi
+                    shadowValid := false
+
+            else // seek_second
+                if not secondValid or currLo < secondValue
+                    secondValid := true
+                    secondIdx := bar_index
+                    secondValue := currLo
+                    secondReal := realLo
+
+                bosTriggered = false
+                if curBull
+                    if high > bosRefPrice
+                        if close > bosRefPrice
+                            bosTriggered := true
+                        else
+                            bosRefPrice := high
+                else
+                    if low < bosRefPrice
+                        if close < bosRefPrice
+                            bosTriggered := true
+                        else
+                            bosRefPrice := low
+
+                if bosTriggered
+                    hvCount += 1
+                    lvCount += 1
+                    firstLbl  = curBull ? "HV" + str.tostring(hvCount) : "LV" + str.tostring(lvCount)
+                    secondLbl = curBull ? "LV" + str.tostring(lvCount) : "HV" + str.tostring(hvCount)
+                    array.push(legs, Leg.new(pendingIdx, pendingReal, firstLbl, secondIdx, secondReal, secondLbl, bar_index, curBull))
+
+                    lastStructIdx := secondIdx
+                    lastStructReal := secondReal
+                    lastStructValid := true
+                    chocRefPrice := secondReal
+                    chocRefIdx := secondIdx
+                    bosHVIdx := pendingIdx
+                    bosHVPrice := pendingReal
+                    bosBreakIdx := bar_index
+                    bosIsBull := curBull
+                    haveBos := true
+                    phase := "seek_first"
+
+                    // candidate = the true extreme across the impulse wave
+                    candIdx = bar_index
+                    candVal = currHi
+                    candReal = realHi
+                    for k = secondIdx + 1 to bar_index
+                        kv = curBull ? high[bar_index - k] : -low[bar_index - k]
+                        kr = curBull ? high[bar_index - k] : low[bar_index - k]
+                        if kv > candVal
+                            candVal := kv
+                            candReal := kr
+                            candIdx := k
+                    candidateIdx := candIdx
+                    candidateValue := candVal
+                    candidateReal := candReal
+                    shadowValid := false
+                    lockedValid := false
+                    pendingValid := false
+                    haveLiveIdm := false
+
+                    // scan the impulse wave for pullbacks to seed the next IDM
+                    for k = secondIdx + 1 to bar_index - 1
+                        // NOTE: isPivotClipped always reads `swingLength` bars
+                        // back from the CURRENT bar, so re-checking a bar `k`
+                        // that isn't `swingLength` bars ago requires the same
+                        // check evaluated as-of when bar k was current - since
+                        // we can't replay that here, approximate using the
+                        // plain (non-offset-shifted) high/low arrays instead.
+                        backStart = math.max(secondIdx, k - swingLength)
+                        forwardEnd = k + swingLength
+                        if forwardEnd <= bar_index
+                            kVal = curBull ? low[bar_index - k] : -high[bar_index - k]
+                            kReal = curBull ? low[bar_index - k] : high[bar_index - k]
+                            okPivot = true
+                            for b = backStart to k - 1
+                                cmp = curBull ? low[bar_index - b] : -high[bar_index - b]
+                                if cmp <= kVal
+                                    okPivot := false
+                            for f = k + 1 to forwardEnd
+                                cmp = curBull ? low[bar_index - f] : -high[bar_index - f]
+                                if cmp <= kVal
+                                    okPivot := false
+                            if okPivot and (not shadowValid or kVal < shadowValue)
+                                shadowValid := true
+                                shadowIdx := k
+                                shadowValue := kVal
+                                shadowReal := kReal
+
+                    if shadowValid
+                        lockedValid := true
+                        lockedIdx := shadowIdx
+                        lockedValue := shadowValue
+                        lockedReal := shadowReal
+                        liveIdmIdx := shadowIdx
+                        liveIdmReal := shadowReal
+                        haveLiveIdm := true
+                        shadowValid := false
+
+// ---------------------------------------------------------------------
+// Incremental mitigation tracking - runs every bar (cheap: one pass over
+// the currently-tracked legs, not a full history rescan) so a leg's
+// second-point line stops being drawn once price closes back through it.
+// ---------------------------------------------------------------------
+for i = 0 to array.size(legs) - 1
+    leg = array.get(legs, i)
+    if not leg.mitigated and leg.secondIdx >= 0 and leg.secondLbl != "" and bar_index > leg.bosBreakIdx
+        isSecondLV = str.contains(leg.secondLbl, "LV")
+        if isSecondLV ? (close < leg.secondPrice) : (close > leg.secondPrice)
+            leg.mitigated := true
+
+// ---------------------------------------------------------------------
+// Drawing (in-place updates on the last bar only, to avoid redrawing on
+// every historical bar during replay - only the final state matters)
+// ---------------------------------------------------------------------
+if barstate.islast
+    // evict legs beyond the max-shown window
+    while array.size(legs) > maxLegsShown
+        old = array.shift(legs)
+        if not na(old.lineObj)
+            line.delete(old.lineObj)
+        if not na(old.firstLabelObj)
+            label.delete(old.firstLabelObj)
+        if not na(old.secondLabelObj)
+            label.delete(old.secondLabelObj)
+
+    for i = 0 to array.size(legs) - 1
+        leg = array.get(legs, i)
+        isFirstHV = str.contains(leg.firstLbl, "HV")
+        if na(leg.firstLabelObj)
+            leg.firstLabelObj := label.new(leg.firstIdx, leg.firstPrice, leg.firstLbl,
+                 color = color.new(color.black, 100),
+                 textcolor = isFirstHV ? colorFirst : colorSecond,
+                 style = isFirstHV ? label.style_label_down : label.style_label_up,
+                 size = labelSize)
+        if leg.secondIdx >= 0 and leg.secondLbl != ""
+            isSecondHV = str.contains(leg.secondLbl, "HV")
+            if na(leg.secondLabelObj)
+                leg.secondLabelObj := label.new(leg.secondIdx, leg.secondPrice, leg.secondLbl,
+                     color = color.new(color.black, 100),
+                     textcolor = isSecondHV ? colorFirst : colorSecond,
+                     style = isSecondHV ? label.style_label_down : label.style_label_up,
+                     size = labelSize)
+            // mitigation status is maintained incrementally, above, each bar
+            if not leg.mitigated
+                lineClr = str.contains(leg.secondLbl, "LV") ? colorSecond : colorFirst
+                if na(leg.lineObj)
+                    leg.lineObj := line.new(leg.secondIdx, leg.secondPrice, bar_index, leg.secondPrice, color = lineClr, style = line.style_dotted, width = 1)
+                else
+                    line.set_xy2(leg.lineObj, bar_index, leg.secondPrice)
+            else if not na(leg.lineObj)
+                line.delete(leg.lineObj)
+                leg.lineObj := na
+        array.set(legs, i, leg)
+
+    // BOS line + label
+    if haveBos
+        if na(bosLine)
+            bosLine := line.new(bosHVIdx, bosHVPrice, bosBreakIdx, bosHVPrice, color = colorBOS, style = line.style_dotted, width = 1)
+            bosLabelO := label.new(bosBreakIdx, bosHVPrice, "BOS", color = color.new(color.black, 100), textcolor = colorBOS, style = bosIsBull ? label.style_label_down : label.style_label_up, size = labelSize)
+        else
+            line.set_xy1(bosLine, bosHVIdx, bosHVPrice)
+            line.set_xy2(bosLine, bosBreakIdx, bosHVPrice)
+            label.set_xy(bosLabelO, bosBreakIdx, bosHVPrice)
+
+    // IDM line + label - live (extends to current bar) vs swept (stops at sweep)
+    if haveLiveIdm
+        if na(idmLine)
+            idmLine := line.new(liveIdmIdx, liveIdmReal, bar_index, liveIdmReal, color = colorIDM, style = line.style_dotted, width = 1)
+            idmLabel := label.new(liveIdmIdx, liveIdmReal, "IDM", color = color.new(color.black, 100), textcolor = colorIDM, style = curBull ? label.style_label_up : label.style_label_down, size = labelSize)
+        else
+            line.set_xy1(idmLine, liveIdmIdx, liveIdmReal)
+            line.set_xy2(idmLine, bar_index, liveIdmReal)
+            label.set_xy(idmLabel, liveIdmIdx, liveIdmReal)
+    else if haveSweptIdm
+        if na(idmLine)
+            idmLine := line.new(sweptIdmIdx, sweptIdmPrice, sweptIdmBreakIdx, sweptIdmPrice, color = colorIDM, style = line.style_dotted, width = 1)
+            idmLabel := label.new(sweptIdmIdx, sweptIdmPrice, "IDM", color = color.new(color.black, 100), textcolor = colorIDM, style = curBull ? label.style_label_up : label.style_label_down, size = labelSize)
+        else
+            line.set_xy1(idmLine, sweptIdmIdx, sweptIdmPrice)
+            line.set_xy2(idmLine, sweptIdmBreakIdx, sweptIdmPrice)
+            label.set_xy(idmLabel, sweptIdmIdx, sweptIdmPrice)
+
+    // pending point (confirmed via IDM sweep, own LV/BOS not closed yet)
+    if phase == "seek_second" and pendingValid
+        pLbl = curBull ? "HV (pending)" : "LV (pending)"
+        if na(pendLine)
+            pendLine := line.new(pendingIdx, pendingReal, bar_index, pendingReal, color = colorPending, style = line.style_dotted, width = 1)
+            pendLabel := label.new(pendingIdx, pendingReal, pLbl, color = color.new(color.black, 100), textcolor = colorPending, style = curBull ? label.style_label_down : label.style_label_up, size = labelSize)
+        else
+            line.set_xy1(pendLine, pendingIdx, pendingReal)
+            line.set_xy2(pendLine, bar_index, pendingReal)
+            label.set_xy(pendLabel, pendingIdx, pendingReal)
+            label.set_text(pendLabel, pLbl)
+    else if not na(pendLine)
+        line.delete(pendLine)
+        label.delete(pendLabel)
+        pendLine := na
+        pendLabel := na
