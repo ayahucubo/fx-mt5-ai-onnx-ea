@@ -1,48 +1,8 @@
 //+------------------------------------------------------------------+
 //|                                             HV_IDM_LV_BOS.mq5    |
-//|  Market structure: Candidate -> IDM -> HV/LV -> BOS               |
-//|  Supports both bullish and bearish bias (InpBias).                 |
-//|  Only draws the LATEST state (live IDM, last HV, last LV, last     |
-//|  BOS) - no historical clutter. CHoCH is not implemented yet.       |
-//|                                                                    |
-//|  Definitions, written for the BULLISH case (InpBias=Bullish). The  |
-//|  BEARISH case is the exact mirror: swap every "high" for "low" and |
-//|  vice versa; the point confirmed first is LV instead of HV, and     |
-//|  the point confirmed second is HV instead of LV.                    |
-//|                                                                    |
-//|   candidate (internal, not drawn) - simply the running highest high |
-//|                         since the leg started. It extends on ANY     |
-//|                         new bar whose high exceeds it - no fractal   |
-//|                         confirmation needed, since it's just "the     |
-//|                         best high seen so far", not a claim that      |
-//|                         nothing will ever exceed it later.            |
-//|   IDM (Inducement)   - the lowest fractal swing-low since the       |
-//|                         active candidate's last update. Shown LIVE  |
-//|                         as soon as a pullback forms, before knowing |
-//|                         whether it will get swept. It is LOCKED IN  |
-//|                         (becomes the operative IDM, replacing        |
-//|                         whatever was locked before) the moment the  |
-//|                         candidate updates to a new, higher high.    |
-//|                         Only the most recently locked IDM is ever   |
-//|                         checked for a swap - older ones stop         |
-//|                         mattering the instant a newer one locks in. |
-//|   HV  (High Valid)   - confirmed the instant any candle's LOW wicks |
-//|                         below the currently locked IDM (wick only,  |
-//|                         no close required). HV's price is the       |
-//|                         active candidate's price at that moment.    |
-//|   LV  (Low Valid)    - after HV, the running lowest LOW since HV is |
-//|                         tracked; a reference level starts at HV's   |
-//|                         price. A candle whose HIGH wicks above the  |
-//|                         reference without closing above it raises   |
-//|                         the reference to that wick's high (a false  |
-//|                         break / swap). The first candle whose CLOSE |
-//|                         closes above the (possibly raised)           |
-//|                         reference confirms BOS; LV is the lowest    |
-//|                         low reached since HV up to that point.      |
-//|                                                                    |
-//|  It has NOT been compiled/tested in a live MetaEditor - compile     |
-//|  and verify on a chart before trusting it for anything that         |
-//|  touches real trades.                                                |
+//|  Market structure: Candidate -> IDM -> HV/LV -> BOS / CHoC       |
+//|  Supports both bullish and bearish bias with auto CHoC detection.|
+//|  Displays: live IDM, latest HV/LV, BOS, CHoC lines.              |
 //+------------------------------------------------------------------+
 #property copyright "generated for fx-mt5-ai-onnx-ea"
 #property indicator_chart_window
@@ -52,38 +12,80 @@
 
 enum ENUM_BIAS
   {
-   BIAS_BULLISH = 0,   // Bullish (HV confirmed first, then LV/BOS)
-   BIAS_BEARISH = 1    // Bearish (LV confirmed first, then HV/BOS)
+   BIAS_BULLISH = 0,   // Bullish
+   BIAS_BEARISH = 1    // Bearish
   };
 
-input ENUM_BIAS InpBias        = BIAS_BULLISH; // Bias
-input datetime  InpStartTime   = 0;            // Start time (0 = auto from InpMaxBars)
+input ENUM_BIAS InpBias        = BIAS_BULLISH; // Initial Bias
+input bool      InpAutoBias    = false;        // Auto-detect CHoC and flip bias dynamically (UNVERIFIED - see note below)
+input bool      InpUseDateRange= false;        // Use Custom Date Range Filter (true/false)
+input datetime  InpStartTime   = D'2026.01.01';// Start Time (when InpUseDateRange=true)
+input datetime  InpEndTime     = D'2026.12.31';// End Time (when InpUseDateRange=true)
 input int       InpSwingLength = 3;            // Fractal swing length (bars each side)
-input int       InpMaxBars     = 3000;         // How many bars back to scan (used when InpStartTime=0)
+input int       InpMaxBars     = 3000;         // How many bars back to scan (when InpUseDateRange=false)
 input color     InpColorIDM    = clrOrange;    // IDM (live) color
 input color     InpColorFirst  = clrDodgerBlue;// First-confirmed point color (HV in bull, LV in bear)
 input color     InpColorSecond = clrMagenta;   // Second-confirmed point color (LV in bull, HV in bear)
-input color     InpColorBOS    = clrLime;      // BOS / reference line color
-input color     InpColorPending= clrAqua;      // Pending (confirmed but its own leg isn't closed yet) point color
+input color     InpColorBOS    = clrLime;      // BOS line color
+input color     InpColorCHoC   = clrWhite;     // CHoC line and label color
+input color     InpColorPending= clrAqua;      // Pending point color
+input color     InpColorRangeLine = clrGray;   // Start/End vertical line color
 input int       InpFontSize    = 9;
 
-#define PFX "HVIDM_"
+// NOTE on InpAutoBias: the CHoC/auto-bias-flip path has NOT been verified
+// against real reversal data - the XAUUSD M5 reference dataset this
+// indicator's core logic was validated against (test-data/ in the repo)
+// never leaves bullish bias, so the bearish-flip branch and the
+// CHoC-triggered-inducement-sweep branch (see the "seek_first" CHoC swap
+// case in OnCalculate) are UNTESTED. Left off by default until validated
+// against a real reversal. The non-CHoC core (candidate/IDM/HV/LV/BOS)
+// IS verified end-to-end against that dataset.
 
-//--- one tracked extreme (a candidate, a shadow/locked opposite point, ...)
+#define PFX "HVIDM_"
+#define MAX_LEGS 256
+#define MAX_CHOCS 64
+
+//--- one tracked extreme
 struct SExtreme
   {
-   int      idx;     // bar index in the ascending (oldest->newest) arrays
-   double   value;   // in TRANSFORMED space (see ToReal()); negate for bearish to get the real price
+   int      idx;        // bar index in [0..len-1]
+   double   value;      // transformed value (for internal state machine)
+   double   realPrice;  // actual price
    bool     valid;
   };
 
-bool g_bull; // true = bullish bias, false = bearish
+//--- one completed leg (HV+LV confirmed together at BOS)
+struct SLeg
+  {
+   int      firstIdx;
+   double   firstPrice;
+   string   firstLbl;
+   int      secondIdx;
+   double   secondPrice;
+   string   secondLbl;
+   int      legN;
+   int      bosBreakIdx;
+   bool     isBull;
+  };
+
+//--- one CHoC event
+struct SCHoC
+  {
+   int      fromIdx;
+   int      breakIdx;
+   double   levelPrice;
+   bool     toBull;
+  };
+
+SLeg   g_legs[MAX_LEGS];
+int    g_nLegs;
+SCHoC  g_chocs[MAX_CHOCS];
+int    g_nChocs;
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   IndicatorSetString(INDICATOR_SHORTNAME,
-                       InpBias == BIAS_BULLISH ? "HV/IDM/LV/BOS (bull)" : "LV/IDM/HV/BOS (bear)");
+   IndicatorSetString(INDICATOR_SHORTNAME, "HV_IDM_LV_BOS (SMC)");
    return(INIT_SUCCEEDED);
   }
 
@@ -94,20 +96,56 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-void MakeExtreme(SExtreme &e, int idx, double value)
+void MakeExtreme(SExtreme &e, int idx, double value, double realPrice)
   {
-   e.idx = idx; e.value = value; e.valid = true;
+   e.idx = idx; e.value = value; e.realPrice = realPrice; e.valid = true;
+  }
+
+string g_activeObjs[];
+int    g_nActiveObjs = 0;
+
+void ResetActiveObjects()
+  {
+   g_nActiveObjs = 0;
+   ArrayResize(g_activeObjs, 0);
+  }
+
+void RegisterActiveObject(string name)
+  {
+   g_nActiveObjs++;
+   ArrayResize(g_activeObjs, g_nActiveObjs);
+   g_activeObjs[g_nActiveObjs - 1] = name;
+  }
+
+bool IsActiveObject(string name)
+  {
+   for(int i = 0; i < g_nActiveObjs; i++)
+      if(g_activeObjs[i] == name)
+         return true;
+   return false;
+  }
+
+void PurgeInactiveObjects()
+  {
+   int total = ObjectsTotal(0, 0, -1);
+   for(int i = total - 1; i >= 0; i--)
+     {
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, PFX) == 0)
+        {
+         if(!IsActiveObject(name))
+            ObjectDelete(0, name);
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
-double ToReal(double v) { return g_bull ? v : -v; }
-
-//+------------------------------------------------------------------+
-//| draw a small text label at (time[idx], realPrice)                 |
+//| draw a small text label at (time, realPrice)                     |
 //+------------------------------------------------------------------+
 void DrawLabel(string name, datetime t, double realPrice, string text,
                color clr, bool above)
   {
+   RegisterActiveObject(name);
    if(ObjectFind(0, name) < 0)
       ObjectCreate(0, name, OBJ_TEXT, 0, t, realPrice);
    else
@@ -117,13 +155,17 @@ void DrawLabel(string name, datetime t, double realPrice, string text,
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpFontSize);
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, above ? ANCHOR_LOWER : ANCHOR_UPPER);
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
 //+------------------------------------------------------------------+
-//| draw a horizontal dotted reference line from bar t1 to bar t2      |
+//| draw a horizontal reference line from bar t1 to bar t2           |
 //+------------------------------------------------------------------+
-void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color clr)
+void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color clr,
+                 ENUM_LINE_STYLE style = STYLE_DOT, int width = 1)
   {
+   RegisterActiveObject(name);
    if(ObjectFind(0, name) < 0)
       ObjectCreate(0, name, OBJ_TREND, 0, t1, realPrice, t2, realPrice);
    else
@@ -132,202 +174,615 @@ void DrawRefLine(string name, datetime t1, datetime t2, double realPrice, color 
       ObjectMove(0, name, 1, t2, realPrice);
      }
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
    ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
   }
 
 //+------------------------------------------------------------------+
-//| Is bar i a fractal low of Arr[], looking back/forward InpSwingLength
-//| bars each way - but the backward side never looks earlier than
-//| backLimit (the bar the current leg's candidate tracking started
-//| from, which moves forward every time the candidate itself updates).
-//| Without this clip, a pivot check can reach back across a leg
-//| boundary into unrelated older price action (e.g. the deep low that
-//| started the PREVIOUS leg) and get wrongly disqualified by it.
+//| draw a vertical reference line at time t                         |
 //+------------------------------------------------------------------+
-bool IsPivotLowClipped(const double &Arr[], int i, int backLimit, int len, int sl)
+void DrawVLine(string name, datetime t, color clr,
+               ENUM_LINE_STYLE style = STYLE_DOT, int width = 1)
+  {
+   RegisterActiveObject(name);
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_VLINE, 0, t, 0);
+   else
+      ObjectMove(0, name, 0, t, 0);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+  }
+
+//+------------------------------------------------------------------+
+//| Pivot check looking back/forward InpSwingLength bars             |
+//+------------------------------------------------------------------+
+bool IsPivotClipped(const double &high[], const double &low[], int i, int backLimit, int len, int sl, bool bull)
   {
    if(i - sl < 0 || i + sl >= len)
       return false;
    int backStart = MathMax(backLimit, i - sl);
-   for(int k = backStart; k < i; k++)
-      if(Arr[k] <= Arr[i]) return false;
-   for(int k = i + 1; k <= i + sl; k++)
-      if(Arr[k] <= Arr[i]) return false;
+   if(bull)
+     {
+      double v = low[i];
+      for(int k = backStart; k < i; k++)
+         if(low[k] <= v) return false;
+      for(int k = i + 1; k <= i + sl; k++)
+         if(low[k] <= v) return false;
+     }
+   else
+     {
+      double v = high[i];
+      for(int k = backStart; k < i; k++)
+         if(high[k] >= v) return false;
+      for(int k = i + 1; k <= i + sl; k++)
+         if(high[k] >= v) return false;
+     }
    return true;
   }
 
 //+------------------------------------------------------------------+
 int OnCalculate(const int rates_total,
-                 const int prev_calculated,
-                 const datetime &time[],
-                 const double &open[],
-                 const double &high[],
-                 const double &low[],
-                 const double &close[],
-                 const long &tick_volume[],
-                 const long &volume[],
-                 const int &spread[])
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
   {
    int n = rates_total;
    if(n < 2 * InpSwingLength + 5)
       return(rates_total);
 
-   g_bull = (InpBias == BIAS_BULLISH);
+   // determine calculation window [start .. end]
+   int start = 0;
+   int end   = n - 1;
 
-   // work in ascending (oldest->newest) order regardless of the chart's
-   // series direction, since OnCalculate already delivers arrays in
-   // ascending (index 0 = oldest) order when the platform default is used.
-   int start;
-   if(InpStartTime > 0)
+   if(InpUseDateRange)
      {
-      start = 0;
-      for(int k = 0; k < n; k++)
-         if(time[k] >= InpStartTime) { start = k; break; }
+      if(InpEndTime > 0)
+        {
+         for(int k = n - 1; k >= 0; k--)
+           {
+            if(time[k] <= InpEndTime)
+              {
+               end = k;
+               break;
+              }
+           }
+        }
+
+      if(InpStartTime > 0)
+        {
+         for(int k = 0; k <= end; k++)
+           {
+            if(time[k] >= InpStartTime)
+              {
+               start = k;
+               break;
+              }
+           }
+        }
      }
    else
-      start = MathMax(0, n - InpMaxBars);
-   int len = n - start;
+     {
+      start = MathMax(0, end - InpMaxBars + 1);
+     }
+
+   if(end < start)
+      return(rates_total);
+
+   int len = end - start + 1;
    if(len < 2 * InpSwingLength + 5)
       return(rates_total);
 
-   // Hi[] / Lo[] are the transformed series: in bullish bias Hi=High, Lo=Low
-   // (used directly); in bearish bias Hi=-Low, Lo=-High, so that "track the
-   // running MAXIMUM of Hi" always means "find the candidate" (a real high
-   // for bull, a real low for bear) and "track the running MINIMUM of Lo"
-   // always means "find the opposite/IDM point" - the whole state machine
-   // below is then bias-agnostic. Cl[] mirrors Close[] the same way.
-   double Hi[], Lo[], Cl[];
-   datetime T[];
-   ArrayResize(Hi, len); ArrayResize(Lo, len);
-   ArrayResize(Cl, len); ArrayResize(T, len);
-   for(int k = 0; k < len; k++)
-     {
-      Hi[k] = g_bull ?  high[start + k] : -low[start + k];
-      Lo[k] = g_bull ?  low[start + k]  : -high[start + k];
-      Cl[k] = g_bull ?  close[start + k]: -close[start + k];
-      T[k]  = time[start + k];
-     }
-
    int sl = InpSwingLength;
 
-   string firstLbl = g_bull ? "HV" : "LV";
-   string secondLbl = g_bull ? "LV" : "HV";
+   // State machine initialization
+   bool curBull = (InpBias == BIAS_BULLISH);
+   int  hvCount = 0;
+   int  lvCount = 0;
+   g_nLegs  = 0;
+   g_nChocs = 0;
 
-   // seed the candidate from the very first bar of the scan window - it's
-   // just "the running high so far", so it needs no pivot confirmation.
-   int firstIdx = 0;
+   SExtreme candidate;
+   MakeExtreme(candidate, 0, curBull ? high[start] : -low[start], curBull ? high[start] : low[start]);
 
-   int legN = 0;
+   SExtreme shadow;                 shadow.valid = false;
+   SExtreme lockedOpp;              lockedOpp.valid = false;
+   SExtreme secondPoint;            secondPoint.valid = false;
+   SExtreme pendingFirst;           pendingFirst.valid = false;
+   SExtreme lastStructuralSecond;   lastStructuralSecond.valid = false;
+   double   chocRefPrice = 0;
+   int      chocRefIdx   = -1;
 
-   SExtreme candidate;    MakeExtreme(candidate, firstIdx, Hi[firstIdx]);
-   SExtreme shadow;       shadow.valid = false;
-   SExtreme lockedOpp;    lockedOpp.valid = false;
-   SExtreme secondPoint;  secondPoint.valid = false;
-   SExtreme reference;    reference.valid = false;
-   SExtreme pendingFirst; pendingFirst.valid = false; // HV confirmed, but its own LV/BOS hasn't happened yet
+   bool     haveLiveIdm = false;
+   SExtreme liveIdm;                liveIdm.valid = false;
+
+   bool     haveSweptIdm     = false;
+   int      sweptIdmIdx      = -1;
+   double   sweptIdmPrice    = 0;
+   int      sweptIdmBreakIdx = -1;
+
+   bool   haveBos     = false;
+   int    bosHVIdx    = -1;
+   double bosHVPrice  = 0;
+   int    bosBreakIdx = -1;
+   bool   bosIsBull   = curBull;
+   double bosRefPrice = 0;
+
    string phase = "seek_first";
 
-   // rolling "latest state" - only these get drawn, at the very end, so the
-   // chart never shows more than one of each even across thousands of bars.
-   // HV/LV/BOS are only ever updated TOGETHER, as one atomic triplet, exactly
-   // when a leg's BOS confirms - so the chart never shows a mismatched pair
-   // (a brand new HV that's still waiting on its own LV sitting next to a
-   // stale LV left over from a completely different, earlier leg).
-   bool     haveLiveIdm = false; SExtreme liveIdm;
-   bool     haveLeg = false;     SExtreme lastFirst, lastSecond; int lastLegN = 0;
-   bool     haveBos = false;     int bosFromIdx = -1, bosIdx = -1; double bosLevel = 0;
-
-   for(int i = firstIdx + 1; i < len - sl; i++)
+   for(int i = 1; i < len; i++)
      {
-      if(phase == "seek_first")
+      double h = high[start + i];
+      double l = low[start + i];
+      double c = close[start + i];
+
+      // 1. Check CHoC (Change of Character) & Dynamic Bias Flipping with SWAP
+      if(InpAutoBias && lastStructuralSecond.valid)
         {
-         if(IsPivotLowClipped(Lo, i, candidate.idx, len, sl) && (!shadow.valid || Lo[i] < shadow.value))
+         bool chocTriggered = false;
+         bool newBull = curBull;
+         if(curBull)
            {
-            MakeExtreme(shadow, i, Lo[i]);
-            liveIdm = shadow; haveLiveIdm = true;
+            if(l < chocRefPrice)
+              {
+               if(c < chocRefPrice)
+                 {
+                  // Body Break! Valid CHoC
+                  chocTriggered = true;
+                  newBull = false; // Bullish broken -> Flip to Bearish
+                 }
+               else
+                 {
+                  // SWAP / Wick sweep: reference is lowered to this wick low
+                  chocRefPrice = l;
+                  chocRefIdx   = i;
+
+                  // If in seek_first, sweeping the previous structural level acts as an inducement sweep,
+                  // confirming candidate as Valid High (HV)
+                  if(phase == "seek_first")
+                    {
+                     hvCount++;
+                     MakeExtreme(pendingFirst, candidate.idx, candidate.value, candidate.realPrice);
+                     bosRefPrice = candidate.realPrice;
+                     if(g_nLegs < MAX_LEGS)
+                       {
+                        g_legs[g_nLegs].firstIdx    = candidate.idx;
+                        g_legs[g_nLegs].firstPrice  = candidate.realPrice;
+                        g_legs[g_nLegs].firstLbl    = "HV" + IntegerToString(hvCount);
+                        g_legs[g_nLegs].secondIdx   = -1;
+                        g_legs[g_nLegs].secondPrice = 0;
+                        g_legs[g_nLegs].secondLbl   = "";
+                        g_legs[g_nLegs].bosBreakIdx = i;
+                        g_legs[g_nLegs].isBull      = true;
+                        g_nLegs++;
+                       }
+                     phase = "seek_second";
+                     MakeExtreme(secondPoint, i, l, l);
+                     continue;
+                    }
+                 }
+              }
+           }
+         else // !curBull (Bearish)
+           {
+            if(h > chocRefPrice)
+              {
+               if(c > chocRefPrice)
+                 {
+                  // Body Break! Valid CHoC
+                  chocTriggered = true;
+                  newBull = true;  // Bearish broken -> Flip to Bullish
+                 }
+               else
+                 {
+                  // SWAP / Wick sweep: reference is raised to this wick high
+                  chocRefPrice = h;
+                  chocRefIdx   = i;
+
+                  // If in seek_first, sweeping the previous structural level acts as an inducement sweep,
+                  // confirming candidate as Valid Low (LV)
+                  if(phase == "seek_first")
+                    {
+                     lvCount++;
+                     MakeExtreme(pendingFirst, candidate.idx, candidate.value, candidate.realPrice);
+                     bosRefPrice = candidate.realPrice;
+                     if(g_nLegs < MAX_LEGS)
+                       {
+                        g_legs[g_nLegs].firstIdx    = candidate.idx;
+                        g_legs[g_nLegs].firstPrice  = candidate.realPrice;
+                        g_legs[g_nLegs].firstLbl    = "LV" + IntegerToString(lvCount);
+                        g_legs[g_nLegs].secondIdx   = -1;
+                        g_legs[g_nLegs].secondPrice = 0;
+                        g_legs[g_nLegs].secondLbl   = "";
+                        g_legs[g_nLegs].bosBreakIdx = i;
+                        g_legs[g_nLegs].isBull      = false;
+                        g_nLegs++;
+                       }
+                     phase = "seek_second";
+                     MakeExtreme(secondPoint, i, -h, h);
+                     continue;
+                    }
+                 }
+              }
            }
 
-         if(lockedOpp.valid && Lo[i] < lockedOpp.value)
+         if(chocTriggered)
            {
-            MakeExtreme(pendingFirst, candidate.idx, candidate.value);
+            if(g_nChocs < MAX_CHOCS)
+              {
+               g_chocs[g_nChocs].fromIdx    = lastStructuralSecond.idx;
+               g_chocs[g_nChocs].breakIdx   = i;
+               g_chocs[g_nChocs].levelPrice = lastStructuralSecond.realPrice;
+               g_chocs[g_nChocs].toBull     = newBull;
+               g_nChocs++;
+              }
+
+            curBull = newBull;
+            // Find extreme point between broken level and break candle
+            if(!curBull)
+              {
+               // Flipped from Bullish to Bearish:
+               // The highest high of the bullish move is confirmed as Valid High (HV)
+               int mIdx = lastStructuralSecond.idx;
+               for(int k = lastStructuralSecond.idx; k <= i; k++)
+                  if(high[start + k] > high[start + mIdx])
+                     mIdx = k;
+
+               hvCount++;
+               if(g_nLegs < MAX_LEGS)
+                 {
+                  g_legs[g_nLegs].firstIdx    = mIdx;
+                  g_legs[g_nLegs].firstPrice  = high[start + mIdx];
+                  g_legs[g_nLegs].firstLbl    = "HV" + IntegerToString(hvCount);
+                  g_legs[g_nLegs].secondIdx   = -1;
+                  g_legs[g_nLegs].secondPrice = 0;
+                  g_legs[g_nLegs].secondLbl   = "";
+                  g_legs[g_nLegs].bosBreakIdx = i;
+                  g_legs[g_nLegs].isBull      = false;
+                  g_nLegs++;
+                 }
+
+               MakeExtreme(lastStructuralSecond, mIdx, -high[start + mIdx], high[start + mIdx]);
+               MakeExtreme(candidate, i, -low[start + i], low[start + i]);
+              }
+            else
+              {
+               // Flipped from Bearish to Bullish:
+               // The lowest low of the bearish move is confirmed as Valid Low (LV)
+               int mIdx = lastStructuralSecond.idx;
+               for(int k = lastStructuralSecond.idx; k <= i; k++)
+                  if(low[start + k] < low[start + mIdx])
+                     mIdx = k;
+
+               lvCount++;
+               if(g_nLegs < MAX_LEGS)
+                 {
+                  g_legs[g_nLegs].firstIdx    = mIdx;
+                  g_legs[g_nLegs].firstPrice  = low[start + mIdx];
+                  g_legs[g_nLegs].firstLbl    = "LV" + IntegerToString(lvCount);
+                  g_legs[g_nLegs].secondIdx   = -1;
+                  g_legs[g_nLegs].secondPrice = 0;
+                  g_legs[g_nLegs].secondLbl   = "";
+                  g_legs[g_nLegs].bosBreakIdx = i;
+                  g_legs[g_nLegs].isBull      = true;
+                  g_nLegs++;
+                 }
+
+               MakeExtreme(lastStructuralSecond, mIdx, low[start + mIdx], low[start + mIdx]);
+               MakeExtreme(candidate, i, high[start + i], high[start + i]);
+              }
+
+            chocRefPrice       = lastStructuralSecond.realPrice;
+            chocRefIdx         = lastStructuralSecond.idx;
+            shadow.valid       = false;
+            lockedOpp.valid    = false;
+            pendingFirst.valid = false;
+            secondPoint.valid  = false;
+            haveLiveIdm        = false;
+            liveIdm.valid      = false;
+            haveSweptIdm       = false;
+            sweptIdmIdx        = -1;
+            sweptIdmBreakIdx   = -1;
+            phase              = "seek_first";
+            continue;
+           }
+        }
+
+      // 2. Normal Structure Processing in Current Bias
+      double currHi = curBull ? h : -l;
+      double currLo = curBull ? l : -h;
+      double currCl = curBull ? c : -c;
+      double realLo = curBull ? l : h;
+      double realHi = curBull ? h : l;
+
+      if(phase == "seek_first")
+        {
+         // IDM shadow tracking
+         if(IsPivotClipped(high, low, start + i, start + candidate.idx, n, sl, curBull))
+           {
+            if(!shadow.valid || currLo < shadow.value)
+               MakeExtreme(shadow, i, currLo, realLo);
+           }
+
+         // HV / LV Confirmation (IDM Sweep)
+         if(lockedOpp.valid && currLo < lockedOpp.value)
+           {
+            MakeExtreme(pendingFirst, candidate.idx, candidate.value, candidate.realPrice);
+            bosRefPrice = candidate.realPrice;
             phase = "seek_second";
-            MakeExtreme(secondPoint, i, Lo[i]);
-            MakeExtreme(reference, candidate.idx, candidate.value);
+            MakeExtreme(secondPoint, i, currLo, realLo);
+
+            sweptIdmIdx      = lockedOpp.idx;
+            sweptIdmPrice    = lockedOpp.realPrice;
+            sweptIdmBreakIdx = i;
+            haveSweptIdm     = true;
+            haveLiveIdm      = false;
+            liveIdm.valid    = false;
             continue;
            }
 
-         if(Hi[i] > candidate.value)
+         // Candidate update
+         if(currHi > candidate.value)
            {
             if(shadow.valid)
               {
-               lockedOpp = shadow;
-               liveIdm = shadow; haveLiveIdm = true;
+               lockedOpp   = shadow;
+               liveIdm     = shadow;
+               haveLiveIdm = true;
               }
-            MakeExtreme(candidate, i, Hi[i]);
+            MakeExtreme(candidate, i, currHi, realHi);
             shadow.valid = false;
            }
         }
       else // seek_second
         {
-         if(Lo[i] < secondPoint.value)
-            MakeExtreme(secondPoint, i, Lo[i]);
+         // Track second point (running extreme after confirmed point)
+         if(!secondPoint.valid || currLo < secondPoint.value)
+            MakeExtreme(secondPoint, i, currLo, realLo);
 
-         if(Cl[i] > reference.value)
+         // BOS Confirmation with SWAP Ratcheting
+         bool bosTriggered = false;
+         if(curBull)
            {
-            legN++;
-            lastFirst = pendingFirst; lastSecond = secondPoint; lastLegN = legN; haveLeg = true;
-            bosFromIdx = reference.idx; bosIdx = i; bosLevel = reference.value;
-            haveBos = true;
-
-            phase = "seek_first";
-            MakeExtreme(candidate, i, Hi[i]);
-            shadow.valid = false;
-            lockedOpp.valid = false;
-            haveLiveIdm = false; // fresh leg - no live IDM yet until a pullback forms
+            if(h > bosRefPrice)
+              {
+               if(c > bosRefPrice)
+                  bosTriggered = true;
+               else
+                  bosRefPrice = h; // BOS SWAP: Ratchet reference higher!
+              }
            }
-         else if(Hi[i] > reference.value)
-            MakeExtreme(reference, i, Hi[i]);
+         else // Bearish
+           {
+            if(l < bosRefPrice)
+              {
+               if(c < bosRefPrice)
+                  bosTriggered = true;
+               else
+                  bosRefPrice = l; // BOS SWAP: Ratchet reference lower!
+              }
+           }
+
+         if(bosTriggered)
+           {
+            if(curBull)
+              {
+               hvCount++;
+               lvCount++;
+               if(g_nLegs < MAX_LEGS)
+                 {
+                  g_legs[g_nLegs].firstIdx    = pendingFirst.idx;
+                  g_legs[g_nLegs].firstPrice  = pendingFirst.realPrice;
+                  g_legs[g_nLegs].firstLbl    = "HV" + IntegerToString(hvCount);
+                  g_legs[g_nLegs].secondIdx   = secondPoint.idx;
+                  g_legs[g_nLegs].secondPrice = secondPoint.realPrice;
+                  g_legs[g_nLegs].secondLbl   = "LV" + IntegerToString(lvCount);
+                  g_legs[g_nLegs].bosBreakIdx = i;
+                  g_legs[g_nLegs].isBull      = curBull;
+                  g_nLegs++;
+                 }
+              }
+            else
+              {
+               lvCount++;
+               hvCount++;
+               if(g_nLegs < MAX_LEGS)
+                 {
+                  g_legs[g_nLegs].firstIdx    = pendingFirst.idx;
+                  g_legs[g_nLegs].firstPrice  = pendingFirst.realPrice;
+                  g_legs[g_nLegs].firstLbl    = "LV" + IntegerToString(lvCount);
+                  g_legs[g_nLegs].secondIdx   = secondPoint.idx;
+                  g_legs[g_nLegs].secondPrice = secondPoint.realPrice;
+                  g_legs[g_nLegs].secondLbl   = "HV" + IntegerToString(hvCount);
+                  g_legs[g_nLegs].bosBreakIdx = i;
+                  g_legs[g_nLegs].isBull      = curBull;
+                  g_nLegs++;
+                 }
+              }
+
+            lastStructuralSecond = secondPoint;
+            chocRefPrice         = secondPoint.realPrice;
+            chocRefIdx           = secondPoint.idx;
+            bosHVIdx    = pendingFirst.idx;
+            bosHVPrice  = pendingFirst.realPrice;
+            bosBreakIdx = i;
+            bosIsBull   = curBull;
+            haveBos     = true;
+            phase = "seek_first";
+
+            // Set candidate to the true extreme (maximum high / minimum low) across the impulse wave
+            int    candIdx  = i;
+            double candVal  = currHi;
+            double candReal = realHi;
+            for(int k = secondPoint.idx + 1; k <= i; k++)
+              {
+               double kVal  = curBull ? high[start + k] : -low[start + k];
+               double kReal = curBull ? high[start + k] : low[start + k];
+               if(kVal > candVal)
+                 {
+                  candVal  = kVal;
+                  candReal = kReal;
+                  candIdx  = k;
+                 }
+              }
+            MakeExtreme(candidate, candIdx, candVal, candReal);
+            shadow.valid       = false;
+            lockedOpp.valid    = false;
+            pendingFirst.valid = false;
+            haveLiveIdm        = false;
+            liveIdm.valid      = false;
+
+            // Scan impulse wave from secondPoint.idx to i (BOS break) for pullbacks
+            for(int k = secondPoint.idx + 1; k < i; k++)
+              {
+               if(IsPivotClipped(high, low, start + k, start + secondPoint.idx, n, sl, curBull))
+                 {
+                  double kVal  = curBull ? low[start + k] : -high[start + k];
+                  double kReal = curBull ? low[start + k] : high[start + k];
+                  if(!shadow.valid || kVal < shadow.value)
+                     MakeExtreme(shadow, k, kVal, kReal);
+                 }
+              }
+
+            if(shadow.valid)
+              {
+               lockedOpp    = shadow;
+               liveIdm      = shadow;
+               haveLiveIdm  = true;
+               shadow.valid = false;
+              }
+           }
         }
      }
 
-   ObjectsDeleteAll(0, PFX);
+   // ----------------------------------------------------------------
+   // Draw Section (Anti-Flicker in-place updates)
+   // ----------------------------------------------------------------
+   ResetActiveObjects();
 
-   if(haveLiveIdm)
+   datetime tNow = time[start + len - 1];
+
+   // 0. Draw Start / End Time Vertical Boundaries
+   if(InpUseDateRange)
      {
-      // no ordinal number here: this point is "live" and may still move to a
-      // deeper pullback before it ever gets locked in, so a fixed "IDM9" would
-      // misleadingly imply it's already the same thing as a specific locked IDM.
-      DrawLabel(PFX + "IDM", T[liveIdm.idx], ToReal(liveIdm.value),
-                "IDM", InpColorIDM, !g_bull);
-      // extend a line from the IDM out to the current bar, same as the SMC-style
-      // "inducement" line - makes the level easy to read against live price
-      // instead of just a floating text label.
-      DrawRefLine(PFX + "IDMline", T[liveIdm.idx], T[len - 1], ToReal(liveIdm.value), InpColorIDM);
+      if(InpStartTime > 0)
+         DrawVLine(PFX + "StartVLine", time[start], InpColorRangeLine, STYLE_DOT, 1);
+      if(InpEndTime > 0)
+         DrawVLine(PFX + "EndVLine", time[end], InpColorRangeLine, STYLE_DOT, 1);
      }
-   if(haveLeg)
+
+   // 1. Draw CHoC Lines & Labels
+   for(int c = 0; c < g_nChocs; c++)
      {
-      DrawLabel(PFX + firstLbl, T[lastFirst.idx], ToReal(lastFirst.value),
-                firstLbl + IntegerToString(lastLegN), InpColorFirst, g_bull);
-      DrawLabel(PFX + secondLbl, T[lastSecond.idx], ToReal(lastSecond.value),
-                secondLbl + IntegerToString(lastLegN), InpColorSecond, !g_bull);
+      int fromIdx  = g_chocs[c].fromIdx;
+      int breakIdx = g_chocs[c].breakIdx;
+      int midIdx   = fromIdx + (breakIdx - fromIdx) / 2;
+
+      datetime tStart = time[start + fromIdx];
+      datetime tEnd   = time[start + breakIdx];
+      datetime tMid   = time[start + midIdx];
+      DrawRefLine(PFX + "CHoC_L_" + IntegerToString(c), tStart, tEnd, g_chocs[c].levelPrice, InpColorCHoC, STYLE_SOLID, 2);
+      DrawLabel(PFX + "CHoC_" + IntegerToString(c), tMid, g_chocs[c].levelPrice, "CHoC", InpColorCHoC, g_chocs[c].toBull);
      }
-   if(haveBos)
+
+   // 2. Completed Legs (Last up-to 10 legs)
+   int drawFrom = MathMax(0, g_nLegs - 10);
+   for(int k = drawFrom; k < g_nLegs; k++)
      {
-      DrawRefLine(PFX + "BOSline", T[bosFromIdx], T[bosIdx], ToReal(bosLevel), InpColorBOS);
-      DrawLabel(PFX + "BOS", T[bosIdx], ToReal(bosLevel), "BOS", InpColorBOS, g_bull);
+      int scanFrom = g_legs[k].bosBreakIdx + 1;
+
+      // First Point Label (HV is always Blue above candle, LV is always Magenta below candle)
+      if(StringFind(g_legs[k].firstLbl, "HV") >= 0)
+         DrawLabel(PFX + g_legs[k].firstLbl, time[start + g_legs[k].firstIdx], g_legs[k].firstPrice,
+                   g_legs[k].firstLbl, InpColorFirst, true);
+      else
+         DrawLabel(PFX + g_legs[k].firstLbl, time[start + g_legs[k].firstIdx], g_legs[k].firstPrice,
+                   g_legs[k].firstLbl, InpColorSecond, false);
+
+      // Second Point Label & Line (only if valid second point exists)
+      if(g_legs[k].secondIdx >= 0 && g_legs[k].secondLbl != "")
+        {
+         if(StringFind(g_legs[k].secondLbl, "HV") >= 0)
+            DrawLabel(PFX + g_legs[k].secondLbl, time[start + g_legs[k].secondIdx], g_legs[k].secondPrice,
+                      g_legs[k].secondLbl, InpColorFirst, true);
+         else
+            DrawLabel(PFX + g_legs[k].secondLbl, time[start + g_legs[k].secondIdx], g_legs[k].secondPrice,
+                      g_legs[k].secondLbl, InpColorSecond, false);
+
+         // Mitigation Check
+         bool lvMitigated = false;
+         for(int j = scanFrom; j < len && !lvMitigated; j++)
+           {
+            if(StringFind(g_legs[k].secondLbl, "LV") >= 0 && close[start + j] < g_legs[k].secondPrice)
+               lvMitigated = true;
+            else if(StringFind(g_legs[k].secondLbl, "HV") >= 0 && close[start + j] > g_legs[k].secondPrice)
+               lvMitigated = true;
+           }
+
+         // Second Point Line (if unmitigated)
+         if(!lvMitigated)
+           {
+            color lineClr = (StringFind(g_legs[k].secondLbl, "LV") >= 0) ? InpColorSecond : InpColorFirst;
+            DrawRefLine(PFX + g_legs[k].secondLbl + "L", time[start + g_legs[k].secondIdx], tNow,
+                        g_legs[k].secondPrice, lineClr, STYLE_DOT, 1);
+           }
+        }
      }
-   // if the most recent HV has already been confirmed (its IDM got swept)
-   // but its own LV/BOS hasn't happened yet, it's real and worth showing -
-   // just not as part of the "lastFirst/lastSecond" matched pair above,
-   // since that pair only ever updates once a leg fully closes. Drawn with
-   // its own color/text so it never gets confused with a confirmed, paired HV.
+
+   // 3. Latest BOS Line & Label
+   if(haveBos && bosHVIdx >= 0 && bosBreakIdx >= 0 && bosBreakIdx < len)
+     {
+      int midIdx = bosHVIdx + (bosBreakIdx - bosHVIdx) / 2;
+      datetime tBosStart = time[start + bosHVIdx];
+      datetime tBosEnd   = time[start + bosBreakIdx];
+      datetime tBosMid   = time[start + midIdx];
+      DrawRefLine(PFX + "BOSline", tBosStart, tBosEnd, bosHVPrice, InpColorBOS, STYLE_DOT, 1);
+      DrawLabel(PFX + "BOS", tBosMid, bosHVPrice, "BOS", InpColorBOS, bosIsBull);
+     }
+
+   // 4. IDM Line & Label
+   if(haveLiveIdm && liveIdm.valid)
+     {
+      // Live IDM waiting to be swept -> extends to right edge (tNow)
+      DrawRefLine(PFX + "IDMline", time[start + liveIdm.idx], tNow, liveIdm.realPrice, InpColorIDM, STYLE_DOT, 1);
+      DrawLabel(PFX + "IDM", time[start + liveIdm.idx], liveIdm.realPrice,
+                "IDM", InpColorIDM, !curBull);
+     }
+   else if(haveSweptIdm && sweptIdmIdx >= 0 && sweptIdmBreakIdx >= 0 && sweptIdmBreakIdx < len)
+     {
+      // Swept IDM -> stops at the sweep/break candle
+      datetime tIdmStart = time[start + sweptIdmIdx];
+      datetime tIdmEnd   = time[start + sweptIdmBreakIdx];
+      DrawRefLine(PFX + "IDMline", tIdmStart, tIdmEnd, sweptIdmPrice, InpColorIDM, STYLE_DOT, 1);
+      DrawLabel(PFX + "IDM", tIdmStart, sweptIdmPrice,
+                "IDM", InpColorIDM, !curBull);
+     }
+
+   // 5. Pending Point (HV pending in bull, LV pending in bear)
    if(phase == "seek_second" && pendingFirst.valid)
-      DrawLabel(PFX + firstLbl + "_pending", T[pendingFirst.idx], ToReal(pendingFirst.value),
-                firstLbl + " (pending)", InpColorPending, g_bull);
+     {
+      string pLbl = curBull ? "HV (pending)" : "LV (pending)";
+      DrawRefLine(PFX + "PendLine", time[start + pendingFirst.idx], tNow,
+                  pendingFirst.realPrice, InpColorPending, STYLE_DOT, 1);
+      DrawLabel(PFX + "PendLbl", time[start + pendingFirst.idx], pendingFirst.realPrice,
+                pLbl, InpColorPending, curBull);
+     }
 
+   PurgeInactiveObjects();
+   ChartRedraw(0);
    return(rates_total);
   }
 //+------------------------------------------------------------------+
