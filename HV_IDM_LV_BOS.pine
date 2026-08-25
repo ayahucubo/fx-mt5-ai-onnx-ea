@@ -31,7 +31,7 @@
 //              reference confirms BOS.
 // =====================================================================
 
-indicator("HV/IDM/LV/BOS (SMC)", overlay = true, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+indicator("HV/IDM/LV/BOS (SMC)", overlay = true, max_lines_count = 500, max_labels_count = 500)
 
 // ---------------------------------------------------------------------
 // SANITY CHECK - unconditional, runs on every bar no matter what, zero
@@ -133,16 +133,19 @@ var string phase   = "seek_first"
 var int    hvCount = 0
 var int    lvCount = 0
 
-// live/pending/BOS/IDM/CHoC drawing objects (single, reused in place -
-// avoids the flicker of delete+recreate every bar)
-var line  idmLine   = na
-var label idmLabel  = na
-var line  bosLine   = na
-var label bosLabelO = na
-var line  pendLine  = na
-var label pendLabel = na
-var line  chocLine  = na
-var label chocLabelO = na
+// live/pending/BOS/IDM/CHoC drawing objects - created ONCE here with
+// placeholder na coordinates (exactly the pattern used by LuxAlgo's
+// "Market Structure with Inducements & Sweeps", confirmed working on
+// the same chart/account), then only ever moved via set_xy1/set_xy2/
+// set_color inside barstate.islast below - never re-created.
+var line  idmLine    = line.new(na, na, na, na, style = line.style_dotted, width = 1)
+var label idmLabel   = label.new(na, na, "IDM", color = color.new(color.black, 100), size = labelSize)
+var line  bosLine    = line.new(na, na, na, na, style = line.style_dotted, width = 1)
+var label bosLabelO  = label.new(na, na, "BOS", color = color.new(color.black, 100), size = labelSize)
+var line  pendLine   = line.new(na, na, na, na, style = line.style_dotted, width = 1)
+var label pendLabel  = label.new(na, na, "", color = color.new(color.black, 100), size = labelSize)
+var line  chocLine   = line.new(na, na, na, na, style = line.style_solid, width = 2)
+var label chocLabelO = label.new(na, na, "CHoC", color = color.new(color.black, 100), size = labelSize)
 
 // ---------------------------------------------------------------------
 // Fractal pivot check for the bar `swingLength` bars ago, with the
@@ -239,14 +242,12 @@ if bar_index >= minBarsNeeded
             if chocTriggeredThisBar
                 newBull = not curBull
                 // CHoC line for the level that just got broken
-                if na(chocLine)
-                    chocLine := line.new(lastStructIdx, lastStructReal, bar_index, lastStructReal, color = colorCHoC, style = line.style_solid, width = 2)
-                    chocLabelO := label.new(bar_index, lastStructReal, "CHoC", color = color.new(color.black, 100), textcolor = colorCHoC, style = newBull ? label.style_label_up : label.style_label_down, size = labelSize)
-                else
-                    line.set_xy1(chocLine, lastStructIdx, lastStructReal)
-                    line.set_xy2(chocLine, bar_index, lastStructReal)
-                    label.set_xy(chocLabelO, bar_index, lastStructReal)
-                    label.set_style(chocLabelO, newBull ? label.style_label_up : label.style_label_down)
+                line.set_xy1(chocLine, lastStructIdx, lastStructReal)
+                line.set_xy2(chocLine, bar_index, lastStructReal)
+                line.set_color(chocLine, colorCHoC)
+                label.set_xy(chocLabelO, bar_index, lastStructReal)
+                label.set_style(chocLabelO, newBull ? label.style_label_up : label.style_label_down)
+                label.set_textcolor(chocLabelO, colorCHoC)
 
                 curBull := newBull
                 if not curBull
@@ -449,50 +450,51 @@ if bar_index >= minBarsNeeded
 // every historical bar during replay - only the final state matters)
 // ---------------------------------------------------------------------
 if barstate.islast
-    // BOS line + label
+    // BOS line + label - always set_*, hidden via na color when not
+    // applicable (same idiom LuxAlgo uses for its ext_* objects)
     if haveBos
-        if na(bosLine)
-            bosLine := line.new(bosHVIdx, bosHVPrice, bosBreakIdx, bosHVPrice, color = colorBOS, style = line.style_dotted, width = 1)
-            bosLabelO := label.new(bosBreakIdx, bosHVPrice, "BOS", color = color.new(color.black, 100), textcolor = colorBOS, style = bosIsBull ? label.style_label_down : label.style_label_up, size = labelSize)
-        else
-            line.set_xy1(bosLine, bosHVIdx, bosHVPrice)
-            line.set_xy2(bosLine, bosBreakIdx, bosHVPrice)
-            label.set_xy(bosLabelO, bosBreakIdx, bosHVPrice)
+        line.set_xy1(bosLine, bosHVIdx, bosHVPrice)
+        line.set_xy2(bosLine, bosBreakIdx, bosHVPrice)
+        line.set_color(bosLine, colorBOS)
+        label.set_xy(bosLabelO, bosBreakIdx, bosHVPrice)
+        label.set_style(bosLabelO, bosIsBull ? label.style_label_down : label.style_label_up)
+        label.set_textcolor(bosLabelO, colorBOS)
+    else
+        line.set_color(bosLine, na)
+        label.set_textcolor(bosLabelO, na)
 
     // IDM line + label - live (extends to current bar) vs swept (stops at sweep)
     if haveLiveIdm
-        if na(idmLine)
-            idmLine := line.new(liveIdmIdx, liveIdmReal, bar_index, liveIdmReal, color = colorIDM, style = line.style_dotted, width = 1)
-            idmLabel := label.new(liveIdmIdx, liveIdmReal, "IDM", color = color.new(color.black, 100), textcolor = colorIDM, style = curBull ? label.style_label_up : label.style_label_down, size = labelSize)
-        else
-            line.set_xy1(idmLine, liveIdmIdx, liveIdmReal)
-            line.set_xy2(idmLine, bar_index, liveIdmReal)
-            label.set_xy(idmLabel, liveIdmIdx, liveIdmReal)
+        line.set_xy1(idmLine, liveIdmIdx, liveIdmReal)
+        line.set_xy2(idmLine, bar_index, liveIdmReal)
+        line.set_color(idmLine, colorIDM)
+        label.set_xy(idmLabel, liveIdmIdx, liveIdmReal)
+        label.set_style(idmLabel, curBull ? label.style_label_up : label.style_label_down)
+        label.set_textcolor(idmLabel, colorIDM)
     else if haveSweptIdm
-        if na(idmLine)
-            idmLine := line.new(sweptIdmIdx, sweptIdmPrice, sweptIdmBreakIdx, sweptIdmPrice, color = colorIDM, style = line.style_dotted, width = 1)
-            idmLabel := label.new(sweptIdmIdx, sweptIdmPrice, "IDM", color = color.new(color.black, 100), textcolor = colorIDM, style = curBull ? label.style_label_up : label.style_label_down, size = labelSize)
-        else
-            line.set_xy1(idmLine, sweptIdmIdx, sweptIdmPrice)
-            line.set_xy2(idmLine, sweptIdmBreakIdx, sweptIdmPrice)
-            label.set_xy(idmLabel, sweptIdmIdx, sweptIdmPrice)
+        line.set_xy1(idmLine, sweptIdmIdx, sweptIdmPrice)
+        line.set_xy2(idmLine, sweptIdmBreakIdx, sweptIdmPrice)
+        line.set_color(idmLine, colorIDM)
+        label.set_xy(idmLabel, sweptIdmIdx, sweptIdmPrice)
+        label.set_style(idmLabel, curBull ? label.style_label_up : label.style_label_down)
+        label.set_textcolor(idmLabel, colorIDM)
+    else
+        line.set_color(idmLine, na)
+        label.set_textcolor(idmLabel, na)
 
     // pending point (confirmed via IDM sweep, own LV/BOS not closed yet)
     if phase == "seek_second" and pendingValid
         pLbl = curBull ? "HV (pending)" : "LV (pending)"
-        if na(pendLine)
-            pendLine := line.new(pendingIdx, pendingReal, bar_index, pendingReal, color = colorPending, style = line.style_dotted, width = 1)
-            pendLabel := label.new(pendingIdx, pendingReal, pLbl, color = color.new(color.black, 100), textcolor = colorPending, style = curBull ? label.style_label_down : label.style_label_up, size = labelSize)
-        else
-            line.set_xy1(pendLine, pendingIdx, pendingReal)
-            line.set_xy2(pendLine, bar_index, pendingReal)
-            label.set_xy(pendLabel, pendingIdx, pendingReal)
-            label.set_text(pendLabel, pLbl)
-    else if not na(pendLine)
-        line.delete(pendLine)
-        label.delete(pendLabel)
-        pendLine := na
-        pendLabel := na
+        line.set_xy1(pendLine, pendingIdx, pendingReal)
+        line.set_xy2(pendLine, bar_index, pendingReal)
+        line.set_color(pendLine, colorPending)
+        label.set_xy(pendLabel, pendingIdx, pendingReal)
+        label.set_text(pendLabel, pLbl)
+        label.set_style(pendLabel, curBull ? label.style_label_down : label.style_label_up)
+        label.set_textcolor(pendLabel, colorPending)
+    else
+        line.set_color(pendLine, na)
+        label.set_textcolor(pendLabel, na)
 
     // -------------------------------------------------------------
     // Temporary debug table - shows internal state so we can see
