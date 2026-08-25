@@ -48,7 +48,6 @@ plot(close, title = "DEBUG: script is running (should track price)", color = col
 biasInput      = input.string("Bullish", "Initial Bias", options = ["Bullish", "Bearish"], group = "Bias")
 autoBias       = input.bool(false, "Auto-detect CHoC and flip bias dynamically (UNVERIFIED)", group = "Bias")
 swingLength    = input.int(3, "Fractal swing length (bars each side)", minval = 1, maxval = 20, group = "Structure")
-maxLegsShown   = input.int(10, "Max completed legs to keep on chart", minval = 1, maxval = 50, group = "Structure")
 colorIDM       = input.color(color.orange, "IDM (live) color", group = "Colors")
 colorFirst     = input.color(color.blue, "First-confirmed point color (HV in bull, LV in bear)", group = "Colors")
 colorSecond    = input.color(color.fuchsia, "Second-confirmed point color (LV in bull, HV in bear)", group = "Colors")
@@ -57,23 +56,6 @@ colorCHoC      = input.color(color.white, "CHoC line/label color", group = "Colo
 colorPending   = input.color(color.aqua, "Pending point color", group = "Colors")
 labelSize      = input.string(size.small, "Label size", options = [size.tiny, size.small, size.normal], group = "Colors")
 showDebug      = input.bool(true, "Show debug state table (temporary diagnostic)", group = "Debug")
-
-// ---------------------------------------------------------------------
-// A completed leg record (HV+LV confirmed together at BOS, or via CHoC)
-// ---------------------------------------------------------------------
-type Leg
-    int    firstIdx
-    float  firstPrice
-    string firstLbl
-    int    secondIdx  = na
-    float  secondPrice = na
-    string secondLbl  = ""
-    int    bosBreakIdx
-    bool   isBull
-    bool   mitigated  = false  // updated incrementally per bar, not rescanned
-    line   lineObj    = na
-    label  firstLabelObj = na
-    label  secondLabelObj = na
 
 // ---------------------------------------------------------------------
 // Persistent state (survives across bars, matching MQL5's per-recalc
@@ -151,8 +133,6 @@ var string phase   = "seek_first"
 var int    hvCount = 0
 var int    lvCount = 0
 
-var Leg[] legs = array.new<Leg>()
-
 // live/pending/BOS/IDM/CHoC drawing objects (single, reused in place -
 // avoids the flicker of delete+recreate every bar)
 var line  idmLine   = na
@@ -228,8 +208,6 @@ if bar_index >= minBarsNeeded
                             pendingValue := candidateValue
                             pendingReal := candidateReal
                             bosRefPrice := candidateReal
-                            newLeg = Leg.new(candidateIdx, candidateReal, "HV" + str.tostring(hvCount), bosBreakIdx = bar_index, isBull = true)
-                            array.push(legs, newLeg)
                             phase := "seek_second"
                             secondIdx := bar_index
                             secondValue := low
@@ -250,8 +228,6 @@ if bar_index >= minBarsNeeded
                             pendingValue := candidateValue
                             pendingReal := candidateReal
                             bosRefPrice := candidateReal
-                            newLeg = Leg.new(candidateIdx, candidateReal, "LV" + str.tostring(lvCount), bosBreakIdx = bar_index, isBull = false)
-                            array.push(legs, newLeg)
                             phase := "seek_second"
                             secondIdx := bar_index
                             secondValue := -high
@@ -283,7 +259,6 @@ if bar_index >= minBarsNeeded
                             mVal := kv
                             mIdx := k
                     hvCount += 1
-                    array.push(legs, Leg.new(mIdx, mVal, "HV" + str.tostring(hvCount), bosBreakIdx = bar_index, isBull = false))
                     lastStructIdx := mIdx
                     lastStructReal := mVal
                     lastStructValid := true
@@ -300,7 +275,6 @@ if bar_index >= minBarsNeeded
                             mVal := kv
                             mIdx := k
                     lvCount += 1
-                    array.push(legs, Leg.new(mIdx, mVal, "LV" + str.tostring(lvCount), bosBreakIdx = bar_index, isBull = true))
                     lastStructIdx := mIdx
                     lastStructReal := mVal
                     lastStructValid := true
@@ -425,9 +399,6 @@ if bar_index >= minBarsNeeded
                 if bosTriggered
                     hvCount += 1
                     lvCount += 1
-                    firstLbl  = curBull ? "HV" + str.tostring(hvCount) : "LV" + str.tostring(lvCount)
-                    secondLbl = curBull ? "LV" + str.tostring(lvCount) : "HV" + str.tostring(hvCount)
-                    array.push(legs, Leg.new(pendingIdx, pendingReal, firstLbl, secondIdx, secondReal, secondLbl, bar_index, curBull))
 
                     lastStructIdx := secondIdx
                     lastStructReal := secondReal
@@ -474,61 +445,10 @@ if bar_index >= minBarsNeeded
                     windowShadowValid := false
 
 // ---------------------------------------------------------------------
-// Incremental mitigation tracking - runs every bar (cheap: one pass over
-// the currently-tracked legs, not a full history rescan) so a leg's
-// second-point line stops being drawn once price closes back through it.
-// ---------------------------------------------------------------------
-for i = 0 to array.size(legs) - 1
-    leg = array.get(legs, i)
-    if not leg.mitigated and leg.secondIdx >= 0 and leg.secondLbl != "" and bar_index > leg.bosBreakIdx
-        isSecondLV = str.contains(leg.secondLbl, "LV")
-        if isSecondLV ? (close < leg.secondPrice) : (close > leg.secondPrice)
-            leg.mitigated := true
-
-// ---------------------------------------------------------------------
 // Drawing (in-place updates on the last bar only, to avoid redrawing on
 // every historical bar during replay - only the final state matters)
 // ---------------------------------------------------------------------
 if barstate.islast
-    // evict legs beyond the max-shown window
-    while array.size(legs) > maxLegsShown
-        old = array.shift(legs)
-        if not na(old.lineObj)
-            line.delete(old.lineObj)
-        if not na(old.firstLabelObj)
-            label.delete(old.firstLabelObj)
-        if not na(old.secondLabelObj)
-            label.delete(old.secondLabelObj)
-
-    for i = 0 to array.size(legs) - 1
-        leg = array.get(legs, i)
-        isFirstHV = str.contains(leg.firstLbl, "HV")
-        if na(leg.firstLabelObj)
-            leg.firstLabelObj := label.new(leg.firstIdx, leg.firstPrice, leg.firstLbl,
-                 color = color.new(color.black, 100),
-                 textcolor = isFirstHV ? colorFirst : colorSecond,
-                 style = isFirstHV ? label.style_label_down : label.style_label_up,
-                 size = labelSize)
-        if leg.secondIdx >= 0 and leg.secondLbl != ""
-            isSecondHV = str.contains(leg.secondLbl, "HV")
-            if na(leg.secondLabelObj)
-                leg.secondLabelObj := label.new(leg.secondIdx, leg.secondPrice, leg.secondLbl,
-                     color = color.new(color.black, 100),
-                     textcolor = isSecondHV ? colorFirst : colorSecond,
-                     style = isSecondHV ? label.style_label_down : label.style_label_up,
-                     size = labelSize)
-            // mitigation status is maintained incrementally, above, each bar
-            if not leg.mitigated
-                lineClr = str.contains(leg.secondLbl, "LV") ? colorSecond : colorFirst
-                if na(leg.lineObj)
-                    leg.lineObj := line.new(leg.secondIdx, leg.secondPrice, bar_index, leg.secondPrice, color = lineClr, style = line.style_dotted, width = 1)
-                else
-                    line.set_xy2(leg.lineObj, bar_index, leg.secondPrice)
-            else if not na(leg.lineObj)
-                line.delete(leg.lineObj)
-                leg.lineObj := na
-        array.set(legs, i, leg)
-
     // BOS line + label
     if haveBos
         if na(bosLine)
@@ -589,8 +509,8 @@ if barstate.islast
         table.cell(dbg, 1, 2, phase, text_color = color.yellow, text_size = size.small)
         table.cell(dbg, 0, 3, "curBull", text_color = color.white, text_size = size.small)
         table.cell(dbg, 1, 3, str.tostring(curBull), text_color = color.white, text_size = size.small)
-        table.cell(dbg, 0, 4, "legs count", text_color = color.white, text_size = size.small)
-        table.cell(dbg, 1, 4, str.tostring(array.size(legs)), text_color = color.white, text_size = size.small)
+        table.cell(dbg, 0, 4, "hvCount/lvCount", text_color = color.white, text_size = size.small)
+        table.cell(dbg, 1, 4, str.tostring(hvCount) + "/" + str.tostring(lvCount), text_color = color.white, text_size = size.small)
         table.cell(dbg, 0, 5, "haveLiveIdm", text_color = color.white, text_size = size.small)
         table.cell(dbg, 1, 5, str.tostring(haveLiveIdm), text_color = color.white, text_size = size.small)
         table.cell(dbg, 0, 6, "haveSweptIdm", text_color = color.white, text_size = size.small)
